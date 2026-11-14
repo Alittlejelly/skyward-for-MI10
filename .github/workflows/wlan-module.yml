@@ -1,0 +1,37 @@
+name: wlan-module
+
+# Rebuilds the qcacld WLAN module against the Fuutao kernel ABI:
+#   kernel umi-q-oss source + device's exact .config + proton clang 12
+# The kernel image is NOT shipped — only the module (.ko) is.
+# The module's symbol CRCs must match the running kernel's table; verify
+# locally with the oracle before flashing.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build kernel + WLAN module
+        run: bash tools/umi/kernel-build/build.sh
+
+      - name: Upload module
+        uses: actions/upload-artifact@v4
+        with:
+          name: wlan-module
+          path: |
+            wlan/qcacld-3.0/wqld.ko
+            kout/Module.symvers
+            kout/.config
+          if-no-files-found: error
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: logs/
