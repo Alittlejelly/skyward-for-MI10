@@ -63,10 +63,19 @@ git clone --depth 1 --branch umi-q-oss \
 # value it would return anyway.
 sed -i 's/ipa_smmu_enabled = qdf_get_ipa_smmu_enabled();/ipa_smmu_enabled = false; \/* IPA off *\//' \
     "$ROOT/wlan/qcacld-3.0/core/cds/src/cds_api.c"
+
+# tequilaOS's dwc3-msm.c references ps5169_cfg_usb() (USB/DP repeater) without
+# a config guard, but the device config keeps PS5169 off — the kernel link
+# then fails with an undefined reference. Fuutao's own dwc3-msm.c lacks these
+# two calls. The kernel image is never flashed, so neutering the calls is
+# safe.
+sed -i 's/ps5169_cfg_usb();/(void)0;/' \
+    "$ROOT/kernel/drivers/usb/dwc3/dwc3-msm.c"
 grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) " "$ROOT/kernel/Makefile"
 
-# Mirror the device's release number for vermagic (cosmetic — the kernel
-# image is never flashed).
+# Mirror the device's release string exactly (read from Image_umi: vermagic
+# is 4.19.157-Fuutao-Qn_miao-gc5038e29c). Cosmetic — the kernel image is
+# never flashed.
 sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 157/' "$ROOT/kernel/Makefile"
 
 echo "== kernel configuration =="
@@ -85,7 +94,7 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
 # Match the device's vermagic exactly, and skip debug info (build speed only —
 # debug info has no effect on ABI or symbol CRCs).
 "$ROOT/kernel/scripts/config" --file "$OUT/.config" \
-    --set-str LOCALVERSION "-Fuutao-Qn_miao-gc50380e2c" \
+    --set-str LOCALVERSION "-Fuutao-Qn_miao-gc5038e29c" \
     --disable LOCALVERSION_AUTO \
     --disable DEBUG_INFO \
     --disable TOUCHSCREEN_ST_FTS_V521 \
