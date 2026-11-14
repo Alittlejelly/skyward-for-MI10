@@ -52,6 +52,13 @@ git clone --depth 1 --branch umi-q-oss \
     https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git "$ROOT/kernel"
 git clone --depth 1 --branch umi-q-oss \
     https://github.com/MiCode/vendor_qcom_opensource_wlan.git "$ROOT/wlan"
+
+# IPA is off in this build, so qdf_get_ipa_smmu_enabled() has no definition.
+# The call site is unreachable when IPA is absent (guarded by ipa_present),
+# but it must not exist in the compiled text at all — replace it with the
+# value it would return anyway.
+sed -i 's/ipa_smmu_enabled = qdf_get_ipa_smmu_enabled();/ipa_smmu_enabled = false; \/* IPA off *\//' \
+    "$ROOT/wlan/qcacld-3.0/core/cds/src/cds_api.c"
 grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) " "$ROOT/kernel/Makefile"
 
 # The device kernel reports 4.19.157; the oss tree is at 4.19.81. Bump
