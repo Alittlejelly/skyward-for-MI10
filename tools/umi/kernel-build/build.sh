@@ -77,17 +77,17 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
     --set-str LOCALVERSION "-Fuutao-Qn_miao-gc50380e2c" \
     --disable LOCALVERSION_AUTO \
     --disable DEBUG_INFO \
-    --disable TOUCHSCREEN_ST_FTS_V521
+    --disable TOUCHSCREEN_ST_FTS_V521 \
+    --disable IPA3
 # The oss tree's fts_521 driver does not compile (references identifiers only
 # present in Xiaomi's internal source); the device runs GOODIX anyway. It is
 # a leaf driver — disabling it cannot affect struct layouts.
 #
-# kcrctab storage: the device kernel has MODVERSIONS in ABSOLUTE form (we
-# mined its CRCs straight out of the kcrctab), so we keep CONFIG_MODULE_REL_
-# CRCS off — bit-for-bit identical storage. Its newer lld tolerates the ABS32
-# relocations this form emits; proton's lld 12 does not, hence the GNU bfd ld
-# for linking (clang still compiles). The vdso link goes through the clang
-# driver and finds the aarch64 ld via the shim below.
+# IPA3 (and its GSI component) trips GNU bfd's --gc-sections check with
+# "dangerous relocation" in __verbose; the WLAN module is built with IPA off
+# anyway (qca6390 profile) and no struct the module touches depends on it.
+# The CRC oracle verifies every symbol the module references, so any layout
+# consequence of these two disables would be caught before flashing.
 "${KMAKE[@]}" olddefconfig
 
 grep -E "^(CONFIG_LOCALVERSION|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_SLUB|CONFIG_ARCH_KONA)=" "$OUT/.config"
