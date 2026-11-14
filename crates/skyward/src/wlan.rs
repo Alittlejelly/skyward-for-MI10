@@ -684,8 +684,14 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
         for path in skyward_modules::load(modules, &cfg.modules)? {
             skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
         }
+        // The chip's housekeeping, a thread of the driver itself, waits for
+        // this word before it powers the chip up: a driver built into the
+        // kernel has probed long before a recovery starts, so this is what
+        // starts a power-up, not a driver of its own loaded above. The write
+        // blocks until the word is taken, and a driver with no file to take
+        // it has already been told.
         for w in &cfg.writes {
-            fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
+            let _ = fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path));
         }
         let until = Instant::now() + INTERFACE_WAIT;
         while !net.exists() {

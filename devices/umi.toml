@@ -25,9 +25,8 @@ cutout = 30
 
 [modules]
 # The phone keeps its modules in the vendor partition: it has no vendor_boot
-# and no vendor_dlkm of its own. /skyward/modules holds our own copy of the
-# WLAN module, patched for the kernel this recovery runs; it wins over the
-# vendor's, which this kernel turns away.
+# and no vendor_dlkm of its own. /skyward/modules is looked at first, for any
+# module the recovery ships patched for the kernel it runs.
 sources = ["skyward", "vendor"]
 
 # The firmware of the WLAN chip, and the apps the secure world loads for the
@@ -139,23 +138,18 @@ capabilities = ["NET_ADMIN"]
 # settings from the vendor partition, the address from the top of persist,
 # where the phone keeps it beside the folders of its own parts.
 [wlan]
-# The kernel carries the whole driver built in, but the built-in one
-# registers while the partitions are still being mounted, its power-up fails
-# once, and it has no retry: what is left for the rest of the boot is only
-# the cold-boot calibration, which never makes an interface. The vendor
-# partition carries the same driver as a module, built against the phone
-# maker's build of the same kernel source, and this kernel (a different
-# build) refuses it outright: its CRC table is out of date, its vermagic
-# names another release, its debugfs symbols are gone, and a module called
-# "wlan" collides with the built-in driver's own sysfs kobject. The copy
-# under /skyward/modules is that vendor module patched to answer all of
-# those: its symbol CRCs rewritten to this kernel's, its vermagic matched,
-# its ten dead debugfs symbols pointed at harmless stubs, its beacon-stats
-# sysfs file (which reads net_device at the other build's layout) dropped,
-# and its name changed to wqld. Loaded plainly, it registers afresh, with
-# everything around it already in place — and a module can be loaded again
-# where the built-in one cannot.
-modules = ["qca_cld3_qca6390"]
+# The kernel carries the whole driver built in, and it is what this recovery
+# runs: cnss2 probes the chip at 0.5 seconds, cnss waits for this recovery to
+# tell it the file system is ready — which is the write below — and then
+# powers the chip up, hands it its firmware from the modem partition, and the
+# driver makes wlan0. Nothing is loaded for this phone: the vendor partition
+# carries the same driver as a module, built against the phone maker's build
+# of the same kernel source, and this kernel (a different build of it) refuses
+# that module outright — its CRC table is out of date, its vermagic names
+# another release, its debugfs symbols are gone, and a module called "wlan"
+# collides with the built-in driver's own sysfs kobject. The built-in driver
+# answers all of that by not being a module at all.
+modules = []
 # What tells the chip it may start: its bus driver holds the power-up until
 # this file is written, which the installed system's own init does while it
 # mounts its partitions.
