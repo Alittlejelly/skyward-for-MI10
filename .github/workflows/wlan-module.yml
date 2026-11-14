@@ -1,10 +1,13 @@
 name: wlan-module
 
 # Rebuilds the qcacld WLAN module against the Fuutao kernel ABI:
-#   kernel umi-q-oss source + device's exact .config + proton clang 12
+#   kernel: Xiaomi's 4.19.157-perf umi tree (tequilaOS "uno" mirror)
+#   config: the device's exact /proc/config.gz (Fuutao)
+#   toolchain: proton clang 12
 # The kernel image is NOT shipped — only the module (.ko) is.
-# The module's symbol CRCs must match the running kernel's table; verify
-# locally with the oracle before flashing.
+# Post-build the module needs CRC patching (patch_crcs.py, kernel truth =
+# wlan7.ko) because Fuutao's tree carries header modifications; layout
+# safety is verified by the probe (net_device->dev == 0x4c8) + oracle.
 
 on:
   workflow_dispatch:
@@ -15,6 +18,18 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache toolchain + sources + kernel objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain
+            kernel
+            wlan
+            kout
+            probe
+          key: wlan-build-v1
+          restore-keys: wlan-build-
 
       - name: Build kernel + WLAN module
         run: bash tools/umi/kernel-build/build.sh
@@ -27,6 +42,7 @@ jobs:
             wlan/qcacld-3.0/wqld.ko
             kout/Module.symvers
             kout/.config
+            probe/probe.ko
           if-no-files-found: error
 
       - name: Upload build logs (on failure)
