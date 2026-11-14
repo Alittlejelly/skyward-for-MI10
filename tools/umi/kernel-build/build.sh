@@ -39,6 +39,10 @@ TC="$ROOT/toolchain/bin"
 mkdir -p "$ROOT/shim"
 ln -sf "$TC/aarch64-linux-gnu-as" "$ROOT/shim/as"
 export PATH="$ROOT/shim:$TC:$PATH"
+# clang prefers tools next to its own binary over PATH, so swap the bundled
+# x86 `as` for the aarch64 one as well.
+mv "$TC/as" "$TC/as.host-x86"
+ln -s aarch64-linux-gnu-as "$TC/as"
 
 echo "== sources =="
 git clone --depth 1 --branch umi-q-oss \
