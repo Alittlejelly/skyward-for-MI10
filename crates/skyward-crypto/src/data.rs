@@ -51,15 +51,19 @@ pub struct Encryption {
 }
 
 impl Encryption {
-    /// Read what an entry of the phone's own table says.
-    pub fn of(entry: &Entry) -> Result<Encryption> {
-        let said = entry.extra("metadata_encryption").context("the phone says its data partition is not encrypted whole")?;
+    /// Read what an entry of the phone's own table says, or that it says
+    /// nothing because the partition is kept unencrypted and only what
+    /// each user's own files hold is encrypted.
+    pub fn of(entry: &Entry) -> Result<Option<Encryption>> {
+        let Some(said) = entry.extra("metadata_encryption") else {
+            return Ok(None);
+        };
         let (name, rest) = said.split_once(':').unwrap_or((said, ""));
         let cipher = CIPHERS
             .iter()
             .find_map(|(theirs, kernels)| (*theirs == name).then_some(*kernels))
             .with_context(|| format!("no cipher here is the {name} the phone names"))?;
-        Ok(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" })
+        Ok(Some(Encryption { cipher: cipher.to_string(), wrapped: rest == "wrappedkey_v0" }))
     }
 }
 
@@ -131,11 +135,18 @@ fn open(service: &KeyMint) -> Result<Opened> {
 /// Map the data partition decrypted, under the key the phone keeps for it,
 /// and give its table's entries, the first the one the key is found by,
 /// and the device the filesystem is read and written through.
+///
+/// A phone may keep the partition itself as it lies and encrypt only what
+/// each user's own files hold. Then the table names no key, and there is
+/// neither a key to unwrap nor a device to map: the partition is read
+/// where it is.
 fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
     let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
-    let encryption = Encryption::of(entry)?;
     let device = skyward_block::fstab::device(entry)?;
+    let Some(encryption) = Encryption::of(entry)? else {
+        return Ok((entries, PathBuf::from(device)));
+    };
     let key = storage_key(service, entry, &encryption)?;
     let sectors = skyward_block::size_bytes(&device)? / 512;
     let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
@@ -209,6 +220,14 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         true => None,
         false => Some(open(service)?),
     };
+    // A phone may keep nothing on the partition encrypted at all: then
+    // there is no key to let in and no user whose own files stay closed,
+    // and everything it holds reads as it was written. Asking the key
+    // service for a key it has never been asked to make would only fail.
+    if !kept_encrypted() {
+        show_owner_storage()?;
+        return Ok(Opening { mounted, closed: Vec::new() });
+    }
     open_shared(service)?;
     let mut closed = Vec::new();
     let mut owner = Note::default();
@@ -225,6 +244,16 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         }
     }
     Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
+}
+
+/// Whether the phone keeps anything on its data partition encrypted. It
+/// writes the key for the files readable before anyone signs in and a key
+/// for each user, the latter under a directory named for the kind of key;
+/// a phone that writes neither keeps nothing so, and its partition reads
+/// as it lies. Android makes the folders either would go in regardless,
+/// so what is looked for is the key itself, not the folder holding it.
+fn kept_encrypted() -> bool {
+    Path::new(SHARED_KEY).join("version").exists() || Path::new(USER_KEYS).join("de").exists()
 }
 
 /// Open the own files of `user` with what they typed at their screen lock
@@ -593,14 +622,21 @@ mod tests {
     #[test]
     fn the_phones_own_words_for_the_cipher_become_the_kernels() {
         let e = entry("metadata_encryption=aes-256-xts:wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption");
-        assert_eq!(Encryption::of(&e).unwrap(), Encryption { cipher: "aes-xts-plain64".into(), wrapped: true });
+        assert_eq!(Encryption::of(&e).unwrap(), Some(Encryption { cipher: "aes-xts-plain64".into(), wrapped: true }));
         let plain = entry("metadata_encryption=adiantum");
-        assert_eq!(Encryption::of(&plain).unwrap(), Encryption { cipher: "xchacha12,aes-adiantum-plain64".into(), wrapped: false });
+        assert_eq!(Encryption::of(&plain).unwrap(), Some(Encryption { cipher: "xchacha12,aes-adiantum-plain64".into(), wrapped: false }));
+    }
+
+    #[test]
+    fn a_partition_the_phone_leaves_unencrypted_names_no_cipher() {
+        // The Mi 10 this was written against keeps /data as it lies and
+        // encrypts only what each user's own files hold, so its table says
+        // nothing of a key for the partition itself.
+        assert_eq!(Encryption::of(&entry("quota,inlinecrypt")).unwrap(), None);
     }
 
     #[test]
     fn a_cipher_or_a_key_the_phone_does_not_name_is_an_error() {
-        assert!(Encryption::of(&entry("quota")).is_err());
         assert!(Encryption::of(&entry("metadata_encryption=rot13")).is_err());
         assert!(key_dir(&entry("quota")).is_err());
     }

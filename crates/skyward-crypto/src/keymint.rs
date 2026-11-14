@@ -122,19 +122,43 @@ pub struct Hardware {
 
 /// The phone's key service, as this program talks to it.
 pub struct KeyMint<'a> {
-    device: Handle<'a>,
+    /// The service, where the phone runs one. A phone that keeps nothing
+    /// on its data partition encrypted needs none, and what such a phone
+    /// holds opens without one; asking it for a key then says so.
+    device: Option<Handle<'a>>,
 }
+
+/// What is said of a call made where no key service runs.
+const NO_SERVICE: &str = "the phone is running no key service, and keeps nothing it holds encrypted";
 
 impl<'a> KeyMint<'a> {
     /// Reach the running key service, or say that none is.
     pub fn open(binder: &'a Binder) -> Result<KeyMint<'a>> {
         let device = service::find(binder, SERVICE)?
             .with_context(|| format!("{SERVICE} is not running; the phone's key service has to be started first"))?;
-        Ok(KeyMint { device })
+        Ok(KeyMint { device: Some(device) })
+    }
+
+    /// The key service where the phone runs one, and nothing where none
+    /// is. What is done with the answer is then the caller's to say: a
+    /// partition that is not encrypted opens without a key, and only a
+    /// key that has to be unwrapped needs one.
+    ///
+    /// A recovery reaches the services of the installed system through the
+    /// directory the installed system starts, and where it starts none the
+    /// lookup itself fails; that is no more a key service than a lookup
+    /// that answers nothing is, and both are taken for none here.
+    pub fn where_running(binder: &'a Binder) -> Result<KeyMint<'a>> {
+        Ok(KeyMint { device: service::find(binder, SERVICE).unwrap_or(None) })
+    }
+
+    /// The service itself, where the phone runs one.
+    fn device(&self) -> Result<&Handle<'a>> {
+        self.device.as_ref().context(NO_SERVICE)
     }
 
     pub fn hardware(&self) -> Result<Hardware> {
-        let reply = self.device.transact(GET_HARDWARE_INFO, &Parcel::call(DEVICE)).context("ask the key service about itself")?;
+        let reply = self.device()?.transact(GET_HARDWARE_INFO, &Parcel::call(DEVICE)).context("ask the key service about itself")?;
         let mut read = reply.read();
         status::ok(&mut read).context("ask the key service about itself")?;
         let end = read.structure()?;
@@ -169,7 +193,7 @@ impl<'a> KeyMint<'a> {
     fn convert(&self, key: &[u8]) -> Result<Vec<u8>> {
         let mut call = Parcel::call(DEVICE);
         call.blob(key);
-        let reply = self.device.transact(CONVERT_STORAGE_KEY, &call).context("make a storage key for this start")?;
+        let reply = self.device()?.transact(CONVERT_STORAGE_KEY, &call).context("make a storage key for this start")?;
         let mut read = reply.read();
         status::ok(&mut read).context("make a storage key for this start")?;
         read.blob().context("read the storage key")
@@ -182,7 +206,7 @@ impl<'a> KeyMint<'a> {
         call.blob(key_blob);
         call.blob(app_id);
         call.blob(&[]);
-        let reply = self.device.transact(GET_KEY_CHARACTERISTICS, &call).context("ask what the key may be used for")?;
+        let reply = self.device()?.transact(GET_KEY_CHARACTERISTICS, &call).context("ask what the key may be used for")?;
         let mut read = reply.read();
         status::ok(&mut read).context("ask what the key may be used for")?;
         let mut out = Vec::new();
@@ -269,7 +293,7 @@ impl<'a> KeyMint<'a> {
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.
-        let reply = self.device.transact(BEGIN, &call).context("start a decryption")?;
+        let reply = self.device()?.transact(BEGIN, &call).context("start a decryption")?;
         let mut read = reply.read();
         status::ok(&mut read).context("start a decryption")?;
         read.structure().context("read what the key service answered")?;
@@ -292,7 +316,7 @@ impl<'a> KeyMint<'a> {
         let mut call = Parcel::call(DEVICE);
         call.blob(key_blob);
         params(&mut call);
-        let reply = self.device.transact(UPGRADE_KEY, &call).context("renew the key")?;
+        let reply = self.device()?.transact(UPGRADE_KEY, &call).context("renew the key")?;
         let mut read = reply.read();
         status::ok(&mut read).context("renew the key")?;
         read.blob().context("read the renewed key")

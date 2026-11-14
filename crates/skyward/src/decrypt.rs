@@ -83,7 +83,9 @@ impl Drop for Decryptor {
 pub fn with_key_service<T>(work: impl FnOnce(&KeyMint) -> Result<T>) -> Result<T, String> {
     let done = (|| {
         let binder = Binder::open()?;
-        let service = KeyMint::open(&binder)?;
+        // A phone that keeps nothing encrypted opens its data partition
+        // without a key service, and one that does starts the one it has.
+        let service = KeyMint::where_running(&binder)?;
         work(&service)
     })();
     done.map_err(|e| format!("{e:#}"))

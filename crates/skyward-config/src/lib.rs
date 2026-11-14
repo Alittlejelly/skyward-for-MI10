@@ -1,7 +1,7 @@
 use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Recovery ramdisk files Skyward reads, adds or changes, as archive paths
 /// (they sit under `/` once the kernel unpacks the ramdisk).
@@ -288,6 +288,11 @@ pub struct Display {
     /// sliding over another rounds its leading corners to it.
     #[serde(default)]
     pub corner_radius: u32,
+    /// How much of the screen's top left a punch-hole camera takes, in dp,
+    /// which the status bar's clock starts past so that it is not hidden
+    /// under it.
+    #[serde(default)]
+    pub cutout: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -342,6 +347,19 @@ pub struct Service {
     /// Directories for LD_LIBRARY_PATH, searched in order.
     #[serde(default)]
     pub libraries: Vec<String>,
+    /// Whether these directories are all the program is to be given, as for
+    /// one the installed system carries rather than one the vendor
+    /// interface does: a program built for a newer system than the vendor
+    /// interface is cannot be handed that interface's libraries.
+    #[serde(default)]
+    pub own_libraries: bool,
+    /// The directory the program is to take for the top of its tree, the
+    /// installed system's own where the program is one of its: it finds its
+    /// libraries, the namespaces its linker was given and the files it reads
+    /// at the paths it was built with only when the tree it runs in is the
+    /// one it was built for.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
     /// The program runs once, to its end, as a service of init's marked
     /// oneshot does: it is not started again, the programs after it start
     /// once it has ended, and it has to end well.
@@ -506,8 +524,10 @@ impl DeviceConfig {
         for log in &cfg.wipe.logs {
             let path = Path::new(log);
             let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
+            // A path in the phone's own tree, read as the phone reads it: on
+            // the host that builds the image, `/data` is no absolute path.
             ensure!(
-                path.is_absolute() && plain && path.starts_with(DATA) && path != Path::new(DATA),
+                log.starts_with('/') && plain && path.starts_with(DATA) && path != Path::new(DATA),
                 "[wipe] logs: {log} is not a folder inside {DATA}"
             );
         }
@@ -545,7 +565,7 @@ impl DeviceConfig {
         }
         if let Some(haptics) = &cfg.haptics {
             let file = &haptics.resonance;
-            ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
+            ensure!(file.starts_with('/'), "[haptics] resonance: {file} is not an absolute path");
             let Strength { lightest, strongest } = haptics.strength;
             ensure!(
                 0.0 < lightest && lightest < strongest && strongest <= 1.0,
@@ -556,7 +576,7 @@ impl DeviceConfig {
             for library in &logd.libraries {
                 let path = Path::new(library);
                 let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
-                ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
+                ensure!(library.starts_with('/') && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
             }
         }
         for owners in &cfg.owners {
@@ -568,13 +588,20 @@ impl DeviceConfig {
             for file in &owners.paths {
                 let path = Path::new(file);
                 let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
-                ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[[owners]] paths: {file} is not an absolute path to a file");
+                ensure!(file.starts_with('/') && plain && path.file_name().is_some(), "[[owners]] paths: {file} is not an absolute path to a file");
             }
         }
         if let Some(stock) = &cfg.stock {
             let name = stock.package.rsplit('/').next().unwrap_or_default();
+            // A full update package is a zip holding payload.bin, as the
+            // phones built for the newer Android have; the older ones name a
+            // fastboot package of tar and gzip, whose images are taken out
+            // by hand.
             ensure!(
-                stock.package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version) && !stock.version.is_empty(),
+                stock.package.starts_with("https://")
+                    && (name.ends_with(".zip") || name.ends_with(".tgz"))
+                    && name.contains(&stock.version)
+                    && !stock.version.is_empty(),
                 "[stock] package: {} is not an HTTPS address of the full package of {}",
                 stock.package,
                 stock.version
@@ -601,7 +628,7 @@ impl DeviceConfig {
                         );
                         ensure!(plain && !file.path.is_empty(), "[wlan] firmware: {} is not a path from the top of {partition}", file.path);
                     }
-                    None => ensure!(path.is_absolute(), "[wlan] firmware: {} is not an absolute path", file.path),
+                    None => ensure!(file.path.starts_with('/'), "[wlan] firmware: {} is not an absolute path", file.path),
                 }
             }
         }

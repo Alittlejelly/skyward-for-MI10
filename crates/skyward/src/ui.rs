@@ -110,7 +110,7 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let top = normal_max(read("max_brightness")?)?;
+        let top = normal_max(read("max_brightness")?);
         let level = read("brightness")?;
         Ok(Backlight { path: dir.join("brightness"), top, level })
     }
@@ -146,8 +146,21 @@ const NORMAL_MAX: [(&str, &str); 3] = [
 /// The raw backlight level, out of `max`, at the panel's normal maximum.
 /// Above it the panel runs in high brightness mode, which the stock system
 /// keeps for strong sunlight and its slider does not reach. The panel the
-/// display driver booted with gives that maximum in the device tree.
-fn normal_max(max: u32) -> Result<u32> {
+/// display driver booted with gives that maximum in the device tree; a panel
+/// whose tree tells nothing of one, as the ones made before the system kept
+/// that mode do, lights all of the range it has from the slider.
+fn normal_max(max: u32) -> u32 {
+    match panel_normal_max(max) {
+        Ok(top) => top,
+        Err(e) => {
+            eprintln!("the panel's normal maximum: {e:#}; the backlight runs to all {max} of it");
+            max
+        }
+    }
+}
+
+/// [`normal_max`], of the panel's node in the device tree.
+fn panel_normal_max(max: u32) -> Result<u32> {
     let param = "/sys/module/msm_drm/parameters/dsi_display0";
     let boot = fs::read_to_string(param).with_context(|| format!("read {param}"))?;
     // The panel's node, then its configuration after a colon, as in
@@ -177,9 +190,40 @@ fn normal_max(max: u32) -> Result<u32> {
     Ok((f64::from(max) * f64::from(normal) / f64::from(full)).round() as u32)
 }
 
+/// Mount binderfs, and name the three devices it makes where Android's own
+/// init names them, which a recovery's init leaves out: the key service and
+/// the credential service that guard the data partition's keys are reached
+/// over them.
+pub fn binders() -> Result<()> {
+    let dir = Path::new("/dev/binderfs");
+    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    if !skyward_block::mount::is_mount_point(dir)? {
+        mount::mount(Path::new("binder"), dir, "binder", &[])?;
+    }
+    for name in ["binder", "hwbinder", "vndbinder"] {
+        let made = dir.join(name);
+        let at = Path::new("/dev").join(name);
+        if !made.exists() {
+            continue;
+        }
+        // The kernel makes the devices its own alone, where Android's init
+        // opens them to every program that runs on the phone.
+        let _ = fs::set_permissions(&made, std::os::unix::fs::PermissionsExt::from_mode(0o666));
+        // A link the recovery's own init left behind points at nothing until
+        // binderfs is mounted, and a link cannot be made over one.
+        if at.is_symlink() || at.exists() {
+            if fs::read_link(&at).is_ok_and(|to| to == made) {
+                continue;
+            }
+            let _ = fs::remove_file(&at);
+        }
+        std::os::unix::fs::symlink(&made, &at).with_context(|| format!("link {name}"))?;
+    }
+    Ok(())
+}
+
 /// Leave recovery for the chosen target.
-fn power(target: Target) -> Result<()> {
-    skyward_sys::power(match target {
+fn power(target: Target) -> Result<()> {    skyward_sys::power(match target {
         Target::System => Power::System,
         Target::Recovery => Power::Recovery,
         Target::Fastboot => Power::Fastboot,
@@ -934,7 +978,15 @@ fn read_mounts(services: &[Service]) -> Result<Vec<skyward_ui::app::MountRow>> {
 
 /// What the phone's boot control holds of the slots, or why it cannot be
 /// asked.
-fn read_slots() -> Result<skyward_vab::BootSlots, String> {
+fn read_slots(has_slots: bool) -> Result<skyward_vab::BootSlots, String> {
+    // A phone with one set of partitions has no slot to choose, and runs no
+    // boot control to ask: its partitions are named without a suffix and
+    // the bootloader starts it from the only set there is. Asking anyway
+    // says of the directory that nothing answered there, which is not what
+    // the page is meant to say.
+    if !has_slots {
+        return Err("this phone has one set of partitions, so there is no slot to choose".into());
+    }
     let read = || -> Result<skyward_vab::BootSlots> {
         let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
         let control = skyward_vab::boot::BootControl::open(&binder, &hardware)?;
@@ -970,6 +1022,10 @@ fn detach(services: Vec<Service>) -> Detach {
         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
         let mounted = skyward_vab::mounted_partitions(slot)?;
         let busy = services::pin(&services, &mounted)?;
+        // The tree the phone's own programs were started in holds the
+        // partitions it was put together from, and a partition held that
+        // way will not come off its mount point's device either.
+        services::release_root()?;
         skyward_vab::release_partitions(slot, &busy)
     })
 }
@@ -1049,6 +1105,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     if cfg.display.density == 0 {
         return Err(anyhow!("{}: [display] density is required to lay out the UI", cfg.device.codename));
     }
+    // The key service and the credential service the data partition's keys
+    // are reached through speak over a binder, and a recovery's init mounts
+    // no binderfs for them: without one the data partition cannot be opened.
+    if let Err(e) = binders() {
+        eprintln!("no binder for the data partition: {e:#}");
+    }
     let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0, mono)?;
     let mut surface = KmsSurface::open("/dev/dri/card0")?;
@@ -1079,6 +1141,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     };
     let mut app = App::new(first, w, h, cfg.display.density as f32 / 160.0);
     app.set_screen_corners(cfg.display.corner_radius as f32);
+    // A punch-hole camera in the screen's top left runs under the status
+    // bar's clock unless the clock starts past it.
+    app.set_status_inset(cfg.display.cutout as f32);
     // The settings kept from the starts before are back before the first
     // frame, and before file transfer starts with its switch and the time
     // zone. The pages speak the language chosen then, or else the one the
@@ -1096,9 +1161,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         locale.unwrap_or("none")
     ))?;
     // The home page tells of a restart into the slot the system does not
-    // run from now: an update or a switch left for the next boot.
-    if info.slot.is_some() {
-        app.set_boot_slots(read_slots());
+    // run from now: an update or a switch left for the next boot. A phone
+    // with one set of partitions has no other slot to be left in.
+    if cfg.device.ab && info.slot.is_some() {
+        app.set_boot_slots(read_slots(true));
     }
     app.set_asked(asked(&request));
     // Opening the data partition, or a user's own files in it, under way,
@@ -1348,7 +1414,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
             let libraries = secure::libraries().unwrap_or_else(|e| {
                 let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
-                None
+                Vec::new()
             });
             Some(wlan::Worker::start(w.clone(), modules, libraries, servers.clone())?)
         }
@@ -2269,7 +2335,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         }
                     },
                     Effect::ReadMounts => app.set_mounts(mounts()),
-                    Effect::ReadSlots => app.set_boot_slots(read_slots()),
+                    Effect::ReadSlots => app.set_boot_slots(read_slots(cfg.device.ab)),
                     Effect::SetSlot(slot) => app.slot_switched(set_slot(slot), now),
                     Effect::ReadSystems => systems_worker.as_mut().context("this phone holds no second system")?.send(systems::Task::Read),
                     // An install still under way may yet write the boot
@@ -2456,7 +2522,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         }
                         // An update in the other slot starts with that slot,
                         // which a system's updater may not have set yet.
-                        app.set_boot_slots(read_slots());
+                        app.set_boot_slots(read_slots(true));
                     }
                     Effect::Merge => {
                         ensure!(merger.is_none(), "the update is being merged already");

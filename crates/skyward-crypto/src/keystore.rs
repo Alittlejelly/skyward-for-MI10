@@ -99,6 +99,11 @@ impl StoredKey {
         service.authorizations(blob, &self.app_id(&[]))
     }
 
+    /// The wrapping the phone's key service holds, where it holds one.
+    pub fn key_blob(&self) -> Option<&[u8]> {
+        self.key_blob.as_deref()
+    }
+
     /// The key itself.
     pub fn unwrap<K: Decryptor>(&self, how: Unwrap<K>) -> Result<Vec<u8>> {
         if self.encrypted.len() < NONCE_BYTES + TAG_BYTES {

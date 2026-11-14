@@ -2724,6 +2724,9 @@ pub struct App {
     backdrop: Option<Canvas>,
     /// How round the screen's corners are, in pixels.
     corners: f32,
+    /// How far from the screen's left edge the status bar's clock starts, in
+    /// pixels, past a punch-hole camera the bar would otherwise run under.
+    status_inset: f32,
     dirty: bool,
     w: u32,
     h: u32,
@@ -2790,6 +2793,7 @@ impl App {
             cols: 0,
             backdrop: None,
             corners: 0.0,
+            status_inset: 0.0,
             dirty: true,
             w,
             h,
@@ -2801,6 +2805,13 @@ impl App {
     /// leading corners of a page sliding over another.
     pub fn set_screen_corners(&mut self, radius: f32) {
         self.corners = radius;
+    }
+
+    /// The status bar's clock starts `dp` from the screen's left edge,
+    /// leaving room for a punch-hole camera there; every mark on the bar's
+    /// right stays where it is.
+    pub fn set_status_inset(&mut self, dp: f32) {
+        self.status_inset = dp * self.px_per_dp;
     }
 
     pub fn theme(&self) -> Theme {
@@ -3613,6 +3624,7 @@ impl App {
         let battery = info.battery.as_ref();
         Bar {
             clock,
+            inset: self.status_inset,
             battery: battery.map(|b| (b.level, b.charging().then_some(if b.quick { Bolt::Quick } else { Bolt::Charging }))),
             wlan: self.wlan_mark(),
             data: match self.state.data {

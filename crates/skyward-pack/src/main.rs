@@ -47,6 +47,35 @@ enum Cmd {
         /// phone or a full update package holds it, ending in its AVB footer.
         #[arg(long)]
         stock: PathBuf,
+        /// An image whose kernel, recovery DTBO and device tree the recovery
+        /// starts with instead of the stock one's, for a phone whose system
+        /// the stock kernel cannot read: one the phone maker built for a
+        /// newer Android than the recovery is made on, whose system is erofs
+        /// while the stock kernel reads ext4 alone. The stock image's header
+        /// and ramdisk stay, with the command line the bootloader reads.
+        #[arg(long)]
+        kernel: Option<PathBuf>,
+        /// A stock recovery image whose ramdisk the recovery starts with
+        /// instead of the one in `stock`: a kernel taken from another image
+        /// needs that image's kernel and device tree but not its ramdisk.
+        #[arg(long)]
+        ramdisk: Option<PathBuf>,
+        /// The recovery DTBO the kernel is started with, as the phone's dtbo
+        /// partition holds it: a kernel from another image needs the overlay
+        /// its own build was made with, which the image it comes from may not
+        /// carry at all.
+        #[arg(long)]
+        dtbo: Option<PathBuf>,
+        /// An image whose header the recovery is written with, instead of the
+        /// stock one's: its addresses and the command line the bootloader
+        /// hands the kernel, which a kernel from that image may need.
+        #[arg(long)]
+        header: Option<PathBuf>,
+        /// Build on a recovery of someone else's: `stock` may then hold a
+        /// custom recovery, whose kernel a phone's installed system needs.
+        /// Its ramdisk is not used unless `ramdisk` names one.
+        #[arg(long)]
+        allow_foreign: bool,
         /// Skyward built for the device (aarch64-linux-android).
         #[arg(long)]
         binary: PathBuf,
@@ -67,6 +96,10 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
+        /// A file to put in the ramdisk, as `where=from`: the path it takes
+        /// in the ramdisk and the file it is taken from.
+        #[arg(long = "file")]
+        files: Vec<String>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -97,7 +130,7 @@ fn main() -> Result<()> {
         }
         Cmd::Repack { image, out } => {
             let mut img = BootImage::read(&image)?;
-            img.ramdisk = Ramdisk::decode(&img.ramdisk)?.encode()?;
+            img.ramdisk = packed(&Ramdisk::decode(&img.ramdisk)?, &img.ramdisk)?;
             write(&out, &img, &img.to_bytes()?)
         }
         Cmd::Boot { kernel, ramdisk, out } => {
@@ -105,17 +138,55 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, kernel, ramdisk, dtbo, header, allow_foreign, binary, system_init, config, font, mono, mono_license, files, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
-            let mut rd = Ramdisk::decode(&img.ramdisk)?;
+            if let Some(header) = &header {
+                // The addresses and the command line the bootloader reads:
+                // what a kernel of another build takes for its own.
+                let from = BootImage::read(header)?;
+                img.header = from.header;
+            }
+            if let Some(kernel) = &kernel {
+                // The kernel and the device tree it was built with, which
+                // describe the hardware it brings up; the stock image's
+                // recovery DTBO stays, since a DTBO is an overlay over that
+                // tree and not a part of it.
+                let from = BootImage::read(kernel)?;
+                img.kernel = from.kernel;
+                img.dtb = from.dtb;
+            }
+            if let Some(dtbo) = &dtbo {
+                img.recovery_dtbo = std::fs::read(dtbo).with_context(|| format!("read {}", dtbo.display()))?;
+            }
+            // The ramdisk as it was packed, whose compression the rebuilt one
+            // keeps: a kernel reads the initramfs of the compression it was
+            // built for.
+            let (mut rd, original) = match &ramdisk {
+                Some(from) => {
+                    let from = BootImage::read(from)?;
+                    (Ramdisk::decode(&from.ramdisk)?, from.ramdisk)
+                }
+                None => (Ramdisk::decode(&img.ramdisk)?, img.ramdisk.clone()),
+            };
             // A stock recovery ramdisk has no third-party tree; refuse to build
             // on top of another custom recovery.
-            if let Some(e) = rd.entries.iter().find(|e| e.name == "FFiles" || e.name.starts_with("twres")) {
-                anyhow::bail!("{} holds {}, which is not a stock recovery", stock.display(), e.name);
+            if !allow_foreign {
+                if let Some(e) = rd.entries.iter().find(|e| e.name == "FFiles" || e.name.starts_with("twres")) {
+                    anyhow::bail!("{} holds {}, which is not a stock recovery", stock.display(), e.name);
+                }
             }
             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
             skyward_config::DeviceConfig::load(&config)?;
+            // Files a device's services need that no partition of the phone
+            // carries: a library another build's linker was to have, a
+            // program nothing else provides. Each is `where=from`, the path
+            // in the ramdisk and the file it is.
+            for file in &files {
+                let (where_, from) = file.split_once('=').with_context(|| format!("a file is {} and takes where=from", file))?;
+                let mode = if from.ends_with(".so") { 0o644 } else { 0o755 };
+                rd.add(where_, mode, read(&PathBuf::from(from))?)?;
+            }
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
             // among its programs, and its unzip there too, a link to ziptool
@@ -148,7 +219,7 @@ fn main() -> Result<()> {
             let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
-            img.ramdisk = rd.encode()?;
+            img.ramdisk = packed(&rd, &original)?;
             let bytes = img.to_bytes()?;
             write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
         }
@@ -160,6 +231,17 @@ fn main() -> Result<()> {
                 None => Ok(()),
             }
         }
+    }
+}
+
+/// The archive `rd` packs, compressed as `original` was: a kernel reads the
+/// initramfs of the compression it was built for, and the phones built before
+/// Android 11 read gzip alone.
+fn packed(rd: &Ramdisk, original: &[u8]) -> Result<Vec<u8>> {
+    if original.starts_with(&[0x1f, 0x8b]) {
+        rd.encode_gzip()
+    } else {
+        rd.encode()
     }
 }
 
@@ -263,7 +345,7 @@ fn list(image: &Path) -> Result<()> {
         h.header_version(),
         img.kernel.len(),
         img.ramdisk.len(),
-        h.osversionpatch
+        h.osversionpatch()
     );
     if img.ramdisk.is_empty() {
         return Ok(());

@@ -169,11 +169,32 @@ enum Cmd {
         #[arg(long)]
         alias: Option<String>,
     },
+    /// Report the phone's key service as the older interface carries it,
+    /// and the raw bytes it answers with: what it says of itself, and what
+    /// it says of the key the phone keeps for its data partition. Both read
+    /// only; nothing is asked that would change or reveal a key.
+    #[cfg(target_os = "android")]
+    Keymaster {
+        #[arg(long, default_value = "/metadata/vold/metadata_encryption/key")]
+        key: PathBuf,
+    },
+    /// Say which of the installed system's partitions the phone's own
+    /// programs still have files on, which is what tells an update whether
+    /// a partition can come off plainly or only leave the tree. Nothing is
+    /// unmounted and nothing is written.
+    #[cfg(target_os = "android")]
+    Detach {
+        #[arg(long, default_value = "/skyward/device.toml")]
+        config: PathBuf,
+        /// Take the partitions off as an update does once it knows which
+        /// are still in use, rather than only saying which those are.
+        #[arg(long)]
+        release: bool,
+    },
     /// Say what the phone's credential service answers, which takes no
     /// credential and changes nothing.
     #[cfg(target_os = "android")]
-    Gatekeeper,
-    /// Say what the phone's weaver says of itself, which reads no slot and
+    Gatekeeper,    /// Say what the phone's weaver says of itself, which reads no slot and
     /// changes nothing.
     #[cfg(target_os = "android")]
     Weaver,
@@ -211,11 +232,30 @@ enum Cmd {
     },
 }
 
+/// Print a reply as it lies, four words to a line: the shapes the phone
+/// answers with are learnt from these before anything is asked of it.
+#[cfg(target_os = "android")]
+fn dump(bytes: &[u8]) {
+    for (i, line) in bytes.chunks(16).enumerate() {
+        println!("  {:04x}  {}", i * 16, hex(line));
+    }
+}
+
+/// Bytes as words of two digits.
+#[cfg(target_os = "android")]
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
 fn main() -> Result<()> {
-    // init starts the recovery service by path with no arguments.
+    // init starts the recovery service by path with no arguments. Anything
+    // named on the command line is a command of its own, even when it is
+    // asked of this very file: the recovery's own pages and the commands
+    // that read the phone are the same program, and which one is wanted is
+    // what the arguments say.
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
-    if name == "recovery" {
+    if name == "recovery" && std::env::args_os().len() == 1 {
         return recovery();
     }
     // Install scripts run the commands linked to this binary by their names.
@@ -278,7 +318,7 @@ fn main() -> Result<()> {
             let props = skyward_info::installed_props(booted_slot()?)?;
             let mut services = DeviceConfig::load(&config)?.services;
             services.retain(|s| s.runs_on(&props));
-            services::start(&services, secure::libraries()?.as_deref())?;
+            services::start(&services, &secure::libraries()?)?;
             loop {
                 std::thread::park();
             }
@@ -350,6 +390,60 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(target_os = "android")]
+        Cmd::Keymaster { key } => {
+            use skyward_crypto::keymaster_hidl as hidl;
+            let hardware = skyward_binder::driver::Binder::hardware()?;
+            let device = hidl::open(&hardware)?;
+            println!("the key service answers for {}", hidl::describes(&device)?);
+
+            let raw = hidl::ask(&device, hidl::SELF, &skyward_binder::hidl::Message::call(hidl::CALLER))?;
+            println!("what it says of itself came back as {} bytes:", raw.len());
+            dump(&raw);
+            match hidl::hardware(&device) {
+                Ok(hw) => println!("  read as security level {}, calling itself {} by {}", hw.security_level, hw.name, hw.author),
+                Err(e) => println!("  reading it failed: {e:#}"),
+            }
+
+            let stored = skyward_crypto::keystore::StoredKey::load(&key)?;
+            let blob = stored.key_blob().context("the key in the directory is wrapped by a secret, not by the key service")?;
+            println!("\nwhat it says the key in {} may be used for:", key.display());
+            let raw = hidl::ask(&device, hidl::USES, &hidl::uses(blob, &[]))?;
+            println!("came back as {} bytes:", raw.len());
+            dump(&raw);
+            match hidl::characteristics(&device, blob, &[]) {
+                Ok(uses) => {
+                    for u in uses {
+                        println!("  tag {} = {} ({:#x}) lay in {} bytes: {}", u.tag, u.value, u.value, u.raw.len(), hex(&u.raw));
+                    }
+                }
+                Err(e) => println!("  reading it failed: {e:#}"),
+            }
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
+        Cmd::Detach { config, release } => {
+            let cfg = DeviceConfig::load(&config)?;
+            let slot = booted_slot()?;
+            let mounted = skyward_vab::mounted_partitions(slot)?;
+            let busy = services::pin(&cfg.services, &mounted)?;
+            for m in &mounted {
+                let state = if busy.contains(&m.mount_point) { "kept in memory" } else { "free to unmount" };
+                println!("{:<16} {:<20} {state}", m.partition, m.mount_point.display());
+            }
+            for m in &mounted {
+                match skyward_block::mount::visible(&m.mount_point)? {
+                    Some(v) => println!("  {} shows {}.{} ({})", m.mount_point.display(), v.device.0, v.device.1, v.filesystem),
+                    None => println!("  {} shows nothing", m.mount_point.display()),
+                }
+            }
+            if release {
+                services::release_root().context("take the installed system's tree apart")?;
+                skyward_vab::release_partitions(slot, &busy).context("take the partitions off")?;
+                println!("the partitions came off");
+            }
+            Ok(())
+        }
+        #[cfg(target_os = "android")]
         Cmd::Gatekeeper => {
             let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
             let gatekeeper = skyward_crypto::gatekeeper::Gatekeeper::open(&binder, &hardware)?;
@@ -386,7 +480,7 @@ fn main() -> Result<()> {
         Cmd::Data { credential, close: false } => {
             use skyward_crypto::data;
             let binder = skyward_binder::driver::Binder::open()?;
-            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+            let service = skyward_crypto::keymint::KeyMint::where_running(&binder)?;
             let opening = data::open_without_credential(&service)?;
             match &opening.mounted {
                 Some(mounted) => {
@@ -535,10 +629,11 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
     }
     let libraries = secure::libraries()?;
-    if let Some(dir) = &libraries {
-        skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
+    if !libraries.is_empty() {
+        let shown: Vec<String> = libraries.iter().map(|p| p.display().to_string()).collect();
+        skyward_sys::kmsg(&format!("the phone's own libraries are at {}", shown.join(", ")))?;
     }
-    services::start(&services, libraries.as_deref())?;
+    services::start(&services, &libraries)?;
     agree_on_the_notes_key(&registering)
 }
 
@@ -747,6 +842,14 @@ fn recovery() -> Result<()> {
             // partitions the system asks for, as in Android's own recovery:
             // erasing them, which may take super with them, and undoing
             // shared blocks, which writes to the slot's own.
+            // The key service and the credential service the data partition's
+            // keys are reached through speak over a binder, and a recovery's
+            // init mounts no binderfs for them. It goes before the partitions
+            // are brought up, since the services that run from them are
+            // started there and cannot start without it.
+            if let Err(e) = ui::binders() {
+                skyward_sys::kmsg(&format!("no binderfs: {e:#}"))?;
+            }
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 prepare(&cfg, booted_slot()?)?;
             }

@@ -121,7 +121,7 @@ impl Worker {
     /// driver's modules are found in, `libraries` the bundle of the vendor
     /// interface's libraries, and `servers` where the DNS servers the
     /// network gives are kept for whoever looks names up.
-    pub fn start(cfg: Config, modules: Vec<PathBuf>, libraries: Option<PathBuf>, servers: Servers) -> Result<Worker> {
+    pub fn start(cfg: Config, modules: Vec<PathBuf>, libraries: Vec<PathBuf>, servers: Servers) -> Result<Worker> {
         let (inbox_tx, inbox) = mpsc::channel();
         let (poked, poke) = pipe()?;
         let (told_tx, told) = mpsc::channel();
@@ -240,7 +240,7 @@ impl Held {
 struct Station {
     cfg: Config,
     modules: Vec<PathBuf>,
-    libraries: Option<PathBuf>,
+    libraries: Vec<PathBuf>,
     servers: Servers,
     state: Wlan,
     running: Option<Running>,
@@ -342,7 +342,7 @@ impl Station {
 
     fn start(&self) -> Result<Running> {
         bring_up(&self.cfg, &self.modules)?;
-        let mut child = start_supplicant(&self.cfg, self.libraries.as_deref())?;
+        let mut child = start_supplicant(&self.cfg, &self.libraries)?;
         let socket = Path::new(HOME).join("sockets").join(&self.cfg.interface);
         let connected = (|| -> Result<(Control, Control)> {
             let control = Control::open(&socket)?;
@@ -668,6 +668,14 @@ impl Station {
 /// Load the driver where its interface is not there yet, and bring the
 /// interface up.
 fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
+    // The firmware loader looks for what the driver asks for on the path
+    // this file names before it asks anyone else; the phone's own init
+    // writes it, and a recovery answers the firmware itself.
+    let _ = fs::write("/sys/module/firmware_class/parameters/path", FIRMWARE);
+    // The socket the chip's housekeeping serves its clients on, under the
+    // folder the data partition keeps for it: the daemon binds it before
+    // it does anything else, and its absence ends the daemon.
+    let _ = fs::create_dir_all("/data/vendor/wifi/sockets");
     let net = Path::new("/sys/class/net").join(&cfg.interface);
     if !net.exists() {
         for file in &cfg.firmware {
@@ -696,19 +704,35 @@ fn place(file: &Firmware) -> Result<()> {
     let bytes = match &file.partition {
         None => fs::read(&file.path).with_context(|| format!("read {}", file.path))?,
         Some(partition) => {
-            let at = Path::new(PARTITIONS).join(partition);
-            fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
-            skyward_block::mount::mount_ro(&Path::new(skyward_block::BY_NAME).join(partition), &at)?;
-            let read = fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path));
-            skyward_block::mount::umount(&at)?;
-            read?
+            // A partition the recovery already shows, as it shows persist at
+            // /mnt/vendor/persist and the modem at /vendor/firmware_mnt, is
+            // read from where it is shown: mounting it again fails while it
+            // is mounted writable, and taking it away from under what runs
+            // from it would be worse. The modem the firmware mounts at
+            // firmware_mnt keeps its files under image, where the paths of
+            // the firmware list already look.
+            let shown = [Path::new("/mnt/vendor"), Path::new("/vendor"), Path::new("/")]
+                .into_iter()
+                .flat_map(|d| [d.join(partition), d.join("firmware_mnt")])
+                .find(|at| at.join(&file.path).exists());
+            match shown {
+                Some(at) => fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path))?,
+                None => {
+                    let at = Path::new(PARTITIONS).join(partition);
+                    fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
+                    skyward_block::mount::mount_ro(&Path::new(skyward_block::BY_NAME).join(partition), &at)?;
+                    let read = fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path));
+                    skyward_block::mount::umount(&at)?;
+                    read?
+                }
+            }
         }
     };
     fs::write(&to, bytes).with_context(|| format!("write {}", to.display()))
 }
 
 /// Start the supplicant on the interface, and wait for its control socket.
-fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
+fn start_supplicant(cfg: &Config, libraries: &[PathBuf]) -> Result<Child> {
     let home = Path::new(HOME);
     let sockets = home.join("sockets");
     fs::create_dir_all(&sockets).with_context(|| format!("make {}", sockets.display()))?;
@@ -725,7 +749,7 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
         fs::remove_file(&socket).with_context(|| format!("take away {}", socket.display()))?;
     }
     let mut path: Vec<String> = cfg.libraries.clone();
-    if let Some(dir) = libraries {
+    for dir in libraries {
         path.push(dir.to_string_lossy().into_owned());
     }
     let mut child = Process::new(&cfg.supplicant)

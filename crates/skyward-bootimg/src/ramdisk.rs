@@ -1,9 +1,13 @@
 use anyhow::{bail, Context, Result};
 use cpio::{NewcBuilder, NewcReader};
+#[cfg(unix)]
 use std::ffi::{CString, OsStr};
+#[cfg(unix)]
 use std::fs;
 use std::io::{Cursor, Read, Write};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -49,11 +53,16 @@ pub struct Ramdisk {
 }
 
 impl Ramdisk {
-    /// Unpack an LZ4 (legacy framing) compressed newc archive, as Android
-    /// boot images carry.
+    /// Unpack a newc archive compressed as Android boot images carry it: with
+    /// gzip, as the phones built before Android 11 carry theirs, or with LZ4
+    /// in its frame, as the ones after do.
     pub fn decode(compressed: &[u8]) -> Result<Self> {
         let mut cpio = Vec::new();
-        lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        if compressed.starts_with(&[0x1f, 0x8b]) {
+            flate2::read::GzDecoder::new(compressed).read_to_end(&mut cpio).context("gzip decode")?;
+        } else {
+            lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        }
         let mut entries = Vec::new();
         let mut rest = Cursor::new(cpio.as_slice());
         loop {
@@ -85,6 +94,15 @@ impl Ramdisk {
     /// unpacker reads no other LZ4 framing) at its highest compression.
     pub fn encode(&self) -> Result<Vec<u8>> {
         lz4_tool(&self.archive()?)
+    }
+
+    /// Pack as a newc archive compressed with gzip, as the boot images of
+    /// phones built before Android 11 carry theirs, whose kernels read
+    /// initramfs of that compression alone.
+    pub fn encode_gzip(&self) -> Result<Vec<u8>> {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&self.archive()?).context("write the archive")?;
+        gz.finish().context("gzip the archive")
     }
 
     /// Pack as a newc archive, uncompressed.
@@ -192,11 +210,16 @@ fn root_entry(name: &str, mode: u32, data: Vec<u8>) -> Entry {
     Entry { name: name.to_string(), mode, uid: 0, gid: 0, mtime: 0, nlink, dev: (0, 0), rdev: (0, 0), data }
 }
 
+#[cfg(unix)]
 fn c_path(path: &Path) -> Result<CString> {
     CString::new(path.as_os_str().as_bytes()).context("a NUL in the path")
 }
 
-/// One entry of [`Ramdisk::unpack`] at `path`.
+/// One entry of [`Ramdisk::unpack`] at `path`. A ramdisk entry names an
+/// owner, a mode and a time that only a Unix host gives a file, so the
+/// packer built for another host says what it cannot do rather than
+/// unpacking without them.
+#[cfg(unix)]
 fn unpack(e: &Entry, path: &Path) -> Result<()> {
     let kind = e.mode & S_IFMT;
     let mode = e.mode & 0o7777;
@@ -243,6 +266,7 @@ fn unpack(e: &Entry, path: &Path) -> Result<()> {
 
 /// Give `path` itself, a link or not, `mtime` as the time it was last
 /// changed and read.
+#[cfg(unix)]
 fn set_time(path: &Path, mtime: u32) -> Result<()> {
     let at = libc::timespec { tv_sec: mtime as libc::time_t, tv_nsec: 0 };
     let times = [at, at];
@@ -250,6 +274,16 @@ fn set_time(path: &Path, mtime: u32) -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("give it its time");
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_time(_path: &Path, _mtime: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn unpack(_e: &Entry, _path: &Path) -> Result<()> {
+    bail!("unpacking a ramdisk needs a host that gives each file its owner, its mode and its time")
 }
 
 /// The legacy LZ4 framing's magic number.

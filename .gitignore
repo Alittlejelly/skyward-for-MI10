@@ -15,3 +15,9 @@ NOTES.md
 TODO.md
 *.draft.md
 notes/
+
+# device adaptation working files (debug captures, kernel dumps, logs)
+*.rgba
+cap*.png
+*.bin
+recovery-dmesg.txt

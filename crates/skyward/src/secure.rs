@@ -25,6 +25,20 @@ const BUNDLE_LIBS: &str = "lib64";
 /// made for.
 const VENDOR_INTERFACE: &str = "ro.vndk.version";
 
+/// The bundle Android keeps the routines its text handling is built on in.
+const ICU_BUNDLE: &str = "com.android.i18n";
+
+/// Where the installed system's own 64-bit libraries are, as the recovery
+/// mounts it, and where the few of them the phone's own programs need but
+/// no other partition carries are gathered for them.
+const INSTALLED_LIBRARIES: &str = "/mnt/system/system/lib64";
+const GAP_LIBRARIES: &str = "/skyward/libs";
+
+/// Where the libraries a program's own partition and the vendor interface
+/// already carry are looked for, so that a gap is filled only with what
+/// neither has.
+const LIBRARY_SOURCES: [&str; 2] = ["/vendor/lib64", "/system/lib64"];
+
 /// Where the phone describes the services its own partitions carry, and
 /// where a recovery looks for such descriptions.
 const DESCRIPTIONS: [&str; 2] = ["/vendor/etc/vintf/manifest", "/odm/etc/vintf/manifest"];
@@ -154,12 +168,74 @@ fn describe_hardware(wanted: &[String]) -> Result<String> {
     Ok(out)
 }
 
-/// Open the bundle of libraries the phone's own partitions were built
-/// against and give the directory they are in. A phone whose partitions
-/// need no bundle has none to open.
-pub fn libraries() -> Result<Option<PathBuf>> {
-    let Some(version) = skyward_sys::prop(VENDOR_INTERFACE) else { return Ok(None) };
-    Ok(bundle(&format!("com.android.vndk.v{version}"))?.map(|at| at.join(BUNDLE_LIBS)))
+/// Open the bundles of libraries the phone's own programs are built
+/// against and give the directories they are in, in the order the phone's
+/// own linker searches them. A phone whose programs need no bundle has
+/// none to open.
+pub fn libraries() -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    let mut vendor_interface = None;
+    if let Some(version) = skyward_sys::prop(VENDOR_INTERFACE) {
+        if let Some(at) = bundle(&format!("com.android.vndk.v{version}"))? {
+            let libs = at.join(BUNDLE_LIBS);
+            vendor_interface = Some(libs.clone());
+            dirs.push(libs);
+        }
+    }
+    // What the phone's own programs link against beyond their vendor
+    // interface: the routines Android's text handling is built on, which
+    // its own linker takes from a bundle of their own.
+    if let Some(at) = bundle(ICU_BUNDLE)? {
+        dirs.push(at.join(BUNDLE_LIBS));
+    }
+    // The few libraries the installed system carries that neither the
+    // vendor interface nor the partitions beside it do. A phone whose
+    // system is several releases newer than the interface its own programs
+    // were built against has its programs link against ones that did not
+    // exist then.
+    if let Some(at) = fill_gaps(vendor_interface.as_deref())? {
+        dirs.push(at);
+    }
+    Ok(dirs)
+}
+
+/// Gather into one folder the installed system's libraries that the vendor
+/// interface, the vendor partition and the recovery's own system all lack,
+/// and give that folder. A program built against the vendor interface finds
+/// them there and nothing else of the system's: its own copies of what the
+/// system also carries stay the ones it was built with.
+fn fill_gaps(vendor_interface: Option<&Path>) -> Result<Option<PathBuf>> {
+    let installed = Path::new(INSTALLED_LIBRARIES);
+    if !installed.is_dir() {
+        return Ok(None);
+    }
+    let into = Path::new(GAP_LIBRARIES);
+    fs::create_dir_all(into).with_context(|| format!("make {}", into.display()))?;
+    // The programs that read these run as accounts of the phone's own, and
+    // what the recovery makes is its own alone until it is opened.
+    fs::set_permissions(into, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .with_context(|| format!("open {} to every account", into.display()))?;
+    let entries = fs::read_dir(installed).with_context(|| format!("read {}", installed.display()))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.ends_with(".so") {
+            continue;
+        }
+        if vendor_interface.is_some_and(|at| at.join(name).exists()) {
+            continue;
+        }
+        if LIBRARY_SOURCES.iter().any(|at| Path::new(at).join(name).exists()) {
+            continue;
+        }
+        let at = into.join(name);
+        if at.exists() {
+            continue;
+        }
+        // A gap that cannot be filled is one no program here asks for.
+        let _ = std::os::unix::fs::symlink(entry.path(), &at);
+    }
+    Ok(Some(into.to_path_buf()))
 }
 
 /// Open the bundle of this name where it lies, and give where it is. A

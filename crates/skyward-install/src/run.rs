@@ -925,16 +925,21 @@ fn extract_script() -> Result<()> {
 }
 
 /// Give scripts written for other recoveries the shell they start with.
+/// Many install scripts declare `#!/sbin/bash`; Android's `sh` is mksh,
+/// which covers the syntax they use, so the same binary stands in for both.
 fn shell_at_sbin() -> Result<()> {
-    let link = Path::new(SBIN_SHELL);
-    match fs::symlink_metadata(link) {
-        Ok(_) => return Ok(()),
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("look at {SBIN_SHELL}")),
-    }
-    let dir = link.parent().expect("the link is in a folder");
+    let dir = Path::new("/sbin");
     fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
-    symlink(SHELL, link).with_context(|| format!("link {SBIN_SHELL} to {SHELL}"))
+    for shell in [SBIN_SHELL, "/sbin/bash"] {
+        let link = Path::new(shell);
+        match fs::symlink_metadata(link) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("look at {shell}")),
+        }
+        symlink(SHELL, link).with_context(|| format!("link {shell} to {SHELL}"))?;
+    }
+    Ok(())
 }
 
 /// A line one of the install script's outputs gave.

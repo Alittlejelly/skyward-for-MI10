@@ -20,6 +20,10 @@ pub use snapshots::Merge;
 pub enum Slot {
     A,
     B,
+    /// A phone with one set of partitions: the bootloader starts it without
+    /// a slot, no partition's name ends in one, and super holds one copy of
+    /// its metadata. Its partitions are named as they are.
+    Single,
 }
 
 impl Slot {
@@ -27,6 +31,7 @@ impl Slot {
         match self {
             Slot::A => "_a",
             Slot::B => "_b",
+            Slot::Single => "",
         }
     }
 
@@ -34,13 +39,15 @@ impl Slot {
         match self {
             Slot::A => "A",
             Slot::B => "B",
+            Slot::Single => "",
         }
     }
 
-    /// The slot's metadata copy in super.
+    /// The slot's metadata copy in super. A phone with one set of partitions
+    /// keeps the first, which is the only one.
     pub fn number(self) -> u32 {
         match self {
-            Slot::A => 0,
+            Slot::A | Slot::Single => 0,
             Slot::B => 1,
         }
     }
@@ -49,6 +56,7 @@ impl Slot {
         match self {
             Slot::A => Slot::B,
             Slot::B => Slot::A,
+            Slot::Single => Slot::Single,
         }
     }
 
@@ -56,6 +64,7 @@ impl Slot {
         match s {
             "_a" => Some(Slot::A),
             "_b" => Some(Slot::B),
+            "" => Some(Slot::Single),
             _ => None,
         }
     }
@@ -72,10 +81,12 @@ pub struct BootSlots {
     pub successful: [bool; 2],
 }
 
-/// The booted slot, or `None` on devices that are not A/B.
+/// The booted slot. A phone with one set of partitions starts without a
+/// slot, which every caller reads as the one its partitions are named
+/// without a suffix.
 pub fn current_slot() -> Result<Option<Slot>> {
     match skyward_block::slot_suffix()? {
-        None => Ok(None),
+        None => Ok(Some(Slot::Single)),
         Some(s) => Slot::from_suffix(&s).map(Some).ok_or_else(|| anyhow!("slot suffix {s:?}")),
     }
 }
