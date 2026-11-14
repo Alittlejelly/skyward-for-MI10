@@ -77,10 +77,15 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
     --set-str LOCALVERSION "-Fuutao-Qn_miao-gc50380e2c" \
     --disable LOCALVERSION_AUTO \
     --disable DEBUG_INFO \
-    --disable TOUCHSCREEN_ST_FTS_V521
+    --disable TOUCHSCREEN_ST_FTS_V521 \
+    --enable MODULE_REL_CRCS
 # The oss tree's fts_521 driver does not compile (references identifiers only
 # present in Xiaomi's internal source); the device runs GOODIX anyway. It is
 # a leaf driver — disabling it cannot affect struct layouts.
+# MODULE_REL_CRCS: lld 12 rejects the ABS32 relocations MODVERSIONS emits for
+# __crc_* symbols. The device kernel's newer lld tolerates them; REL_CRCS
+# stores the table relatively instead. Kernel-internal — module ABI, symbol
+# CRC values and struct layouts are unaffected.
 "${KMAKE[@]}" olddefconfig
 
 grep -E "^(CONFIG_LOCALVERSION|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_SLUB|CONFIG_ARCH_KONA)=" "$OUT/.config"
