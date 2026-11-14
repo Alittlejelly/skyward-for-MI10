@@ -32,10 +32,13 @@ tar -xzf "$ROOT/proton.tgz" -C "$ROOT/toolchain" --strip-components=1
 TC="$ROOT/toolchain/bin"
 "$TC/clang" --version | head -1
 
-# Kernel 4.19 forces -no-integrated-as under clang, so the driver looks up a
-# bare `as` on PATH. Proton ships the matching aarch64 GNU as — put it first.
-# Host tools must not see it: pin them to /usr/bin via gcc's -B.
-export PATH="$TC:$PATH"
+# Kernel 4.19 forces -no-integrated-as under clang, whose driver looks up a
+# bare `as` on PATH. Proton's bare `as` is the x86 one; the aarch64 assembler
+# is `aarch64-linux-gnu-as` — shim the name. Host tools must not see it: they
+# are pinned to /usr/bin via gcc's -B.
+mkdir -p "$ROOT/shim"
+ln -sf "$TC/aarch64-linux-gnu-as" "$ROOT/shim/as"
+export PATH="$ROOT/shim:$TC:$PATH"
 
 echo "== sources =="
 git clone --depth 1 --branch umi-q-oss \
