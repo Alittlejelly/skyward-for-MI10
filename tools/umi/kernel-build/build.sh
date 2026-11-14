@@ -63,9 +63,9 @@ OUT="$ROOT/kout"
 mkdir -p "$OUT"
 cp "$ROOT/tools/umi/kernel-build/futao.config" "$OUT/.config"
 
-KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64 CONFIG_MODULE_REL_CRCS=y
+KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
     CC="$TC/clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-    LD="$TC/ld.lld" AR="$TC/llvm-ar" NM="$TC/llvm-nm"
+    LD="$TC/aarch64-linux-gnu-ld" AR="$TC/llvm-ar" NM="$TC/llvm-nm"
     OBJCOPY="$TC/llvm-objcopy" OBJDUMP="$TC/llvm-objdump" STRIP="$TC/llvm-strip"
     HOSTCC="gcc-9 -B/usr/bin/" HOSTCXX="g++-9 -B/usr/bin/" KCFLAGS=-Wno-error)
 
@@ -77,18 +77,17 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64 CONFIG_MODULE_REL_CRCS=y
     --set-str LOCALVERSION "-Fuutao-Qn_miao-gc50380e2c" \
     --disable LOCALVERSION_AUTO \
     --disable DEBUG_INFO \
-    --disable TOUCHSCREEN_ST_FTS_V521 \
-    --enable MODULE_REL_CRCS
+    --disable TOUCHSCREEN_ST_FTS_V521
 # The oss tree's fts_521 driver does not compile (references identifiers only
 # present in Xiaomi's internal source); the device runs GOODIX anyway. It is
 # a leaf driver — disabling it cannot affect struct layouts.
-# MODULE_REL_CRCS: lld 12 rejects the ABS32 relocations MODVERSIONS emits for
-# __crc_* symbols. The device kernel's newer lld tolerates them; REL_CRCS
-# stores the table relatively instead. Kernel-internal — module ABI, symbol
-# CRC values and struct layouts are unaffected.
-# NOTE: it is a prompt-less kconfig symbol, so olddefconfig ignores the value
-# in .config — pass it on the make command line (scripts/Makefile.build reads
-# it as a plain make variable when invoking genksyms).
+#
+# kcrctab storage: the device kernel has MODVERSIONS in ABSOLUTE form (we
+# mined its CRCs straight out of the kcrctab), so we keep CONFIG_MODULE_REL_
+# CRCS off — bit-for-bit identical storage. Its newer lld tolerates the ABS32
+# relocations this form emits; proton's lld 12 does not, hence the GNU bfd ld
+# for linking (clang still compiles). The vdso link goes through the clang
+# driver and finds the aarch64 ld via the shim below.
 "${KMAKE[@]}" olddefconfig
 
 grep -E "^(CONFIG_LOCALVERSION|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_SLUB|CONFIG_ARCH_KONA)=" "$OUT/.config"
