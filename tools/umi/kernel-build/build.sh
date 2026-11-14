@@ -63,7 +63,7 @@ OUT="$ROOT/kout"
 mkdir -p "$OUT"
 cp "$ROOT/tools/umi/kernel-build/futao.config" "$OUT/.config"
 
-KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
+KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64 CONFIG_MODULE_REL_CRCS=y
     CC="$TC/clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
     LD="$TC/ld.lld" AR="$TC/llvm-ar" NM="$TC/llvm-nm"
     OBJCOPY="$TC/llvm-objcopy" OBJDUMP="$TC/llvm-objdump" STRIP="$TC/llvm-strip"
@@ -86,6 +86,9 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
 # __crc_* symbols. The device kernel's newer lld tolerates them; REL_CRCS
 # stores the table relatively instead. Kernel-internal — module ABI, symbol
 # CRC values and struct layouts are unaffected.
+# NOTE: it is a prompt-less kconfig symbol, so olddefconfig ignores the value
+# in .config — pass it on the make command line (scripts/Makefile.build reads
+# it as a plain make variable when invoking genksyms).
 "${KMAKE[@]}" olddefconfig
 
 grep -E "^(CONFIG_LOCALVERSION|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_SLUB|CONFIG_ARCH_KONA)=" "$OUT/.config"
