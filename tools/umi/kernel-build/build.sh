@@ -88,8 +88,8 @@ sed -i 's/ipa_smmu_enabled = qdf_get_ipa_smmu_enabled();/ipa_smmu_enabled = fals
 cat > "$ROOT/wlan/qca-wifi-host-cmn/qdf/linux/src/qdf_wakeup_compat.h" <<'EOF'
 #ifndef _QDF_WAKEUP_COMPAT_H_
 #define _QDF_WAKEUP_COMPAT_H_
+#include <linux/device.h>
 #include <linux/string.h>
-#include <linux/pm_wakeup.h>
 static inline void wakeup_source_init(struct wakeup_source *ws, const char *name)
 {
 	memset(ws, 0, sizeof(*ws));
