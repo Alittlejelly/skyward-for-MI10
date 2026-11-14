@@ -76,7 +76,11 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
 "$ROOT/kernel/scripts/config" --file "$OUT/.config" \
     --set-str LOCALVERSION "-Fuutao-Qn_miao-gc50380e2c" \
     --disable LOCALVERSION_AUTO \
-    --disable DEBUG_INFO
+    --disable DEBUG_INFO \
+    --disable TOUCHSCREEN_ST_FTS_V521
+# The oss tree's fts_521 driver does not compile (references identifiers only
+# present in Xiaomi's internal source); the device runs GOODIX anyway. It is
+# a leaf driver — disabling it cannot affect struct layouts.
 "${KMAKE[@]}" olddefconfig
 
 grep -E "^(CONFIG_LOCALVERSION|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_SLUB|CONFIG_ARCH_KONA)=" "$OUT/.config"
