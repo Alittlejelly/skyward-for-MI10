@@ -139,21 +139,30 @@ capabilities = ["NET_ADMIN"]
 # where the phone keeps it beside the folders of its own parts.
 [wlan]
 # The kernel carries the whole driver built in, and it is what this recovery
-# runs: cnss2 probes the chip at 0.5 seconds, cnss waits for this recovery to
-# tell it the file system is ready — which is the write below — and then
-# powers the chip up, hands it its firmware from the modem partition, and the
-# driver makes wlan0. Nothing is loaded for this phone: the vendor partition
-# carries the same driver as a module, built against the phone maker's build
-# of the same kernel source, and this kernel (a different build of it) refuses
-# that module outright — its CRC table is out of date, its vermagic names
-# another release, its debugfs symbols are gone, and a module called "wlan"
-# collides with the built-in driver's own sysfs kobject. The built-in driver
-# answers all of that by not being a module at all.
+# runs, but a built-in driver does not load itself for anyone. Its char device
+# sits waiting for the word the installed system's framework writes when the
+# user turns the WLAN on; only then does the driver register with cnss2, take
+# the chip through a power-up and make wlan0. Both words are written below, in
+# this order — the file system's readiness first, so cnss2 starts the cold
+# boot calibration, and the driver's own word second, which waits for that
+# calibration before it brings the chip up. Nothing is loaded as a module for
+# this phone: the vendor partition carries the same driver as a module, built
+# against the phone maker's build of the same kernel source, and this kernel
+# (a different build of it) refuses that module outright — its CRC table is
+# out of date, its vermagic names another release, its debugfs symbols are
+# gone, and a module called "wlan" collides with the built-in driver's own
+# sysfs kobject.
 modules = []
 # What tells the chip it may start: its bus driver holds the power-up until
 # this file is written, which the installed system's own init does while it
-# mounts its partitions.
-writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+# mounts its partitions. The second write is the framework's own word to the
+# driver's char device (`wlan_hdd_state_ctrl_param_write`, three bytes, "ON"
+# and a newline): it blocks for as long as the framework would wait, and the
+# interface is there when it returns.
+writes = [
+    { path = "/sys/kernel/cnss/fs_ready", value = "1" },
+    { path = "/dev/wlan", value = "ON\n" },
+]
 interface = "wlan0"
 supplicant = "/vendor/bin/hw/wpa_supplicant"
 libraries = ["/vendor/lib64", "/system/lib64"]
