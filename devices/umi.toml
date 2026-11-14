@@ -25,8 +25,10 @@ cutout = 30
 
 [modules]
 # The phone keeps its modules in the vendor partition: it has no vendor_boot
-# and no vendor_dlkm of its own.
-sources = ["vendor"]
+# and no vendor_dlkm of its own. /skyward/modules holds our own copy of the
+# WLAN module, patched for the kernel this recovery runs; it wins over the
+# vendor's, which this kernel turns away.
+sources = ["skyward", "vendor"]
 
 # The firmware of the WLAN chip, and the apps the secure world loads for the
 # secure element's service, are on the modem partition, which the phone
@@ -137,13 +139,23 @@ capabilities = ["NET_ADMIN"]
 # settings from the vendor partition, the address from the top of persist,
 # where the phone keeps it beside the folders of its own parts.
 [wlan]
-# The driver is built into the kernel this phone's ROM starts with: the
-# QCA6390's host driver, its bus driver and the 802.11 stack all come up with
-# it, and no module is loaded for any of them. The modules the vendor
-# partition carries were built against another kernel than the one the ROM
-# ships, so the kernel refuses every one of them; the chip is driven as it
-# comes.
-modules = []
+# The kernel carries the whole driver built in, but the built-in one
+# registers while the partitions are still being mounted, its power-up fails
+# once, and it has no retry: what is left for the rest of the boot is only
+# the cold-boot calibration, which never makes an interface. The vendor
+# partition carries the same driver as a module, built against the phone
+# maker's build of the same kernel source, and this kernel (a different
+# build) refuses it outright: its CRC table is out of date, its vermagic
+# names another release, its debugfs symbols are gone, and a module called
+# "wlan" collides with the built-in driver's own sysfs kobject. The copy
+# under /skyward/modules is that vendor module patched to answer all of
+# those: its symbol CRCs rewritten to this kernel's, its vermagic matched,
+# its ten dead debugfs symbols pointed at harmless stubs, its beacon-stats
+# sysfs file (which reads net_device at the other build's layout) dropped,
+# and its name changed to wqld. Loaded plainly, it registers afresh, with
+# everything around it already in place — and a module can be loaded again
+# where the built-in one cannot.
+modules = ["qca_cld3_qca6390"]
 # What tells the chip it may start: its bus driver holds the power-up until
 # this file is written, which the installed system's own init does while it
 # mounts its partitions.
@@ -180,7 +192,7 @@ server = "https://update.miui.com/updates/miotaV3.php"
 # partition as the phone and the package hold it.
 [stock]
 version = "OS1.0.5.0.TJBCNXM"
-package = "https://bigota.d.miui.com/OS1.0.5.0.TJBCNXM/umi_images_OS1.0.5.0.TJBCNXM_20240605.0000.00_13.0_cn_9917250319.tgz"
+package = "https://cdnorg.d.miui.com/OS1.0.5.0.TJBCNXM/miui_UMI_OS1.0.5.0.TJBCNXM_d01651ed86_13.0.zip"
 recovery = "de565b9acc26a409d728f06a8b7c38c809173e0e1bd153d3d61683b2baf01ef4"
 
 # The kernel the recovery runs, which the stock recovery's own cannot be: the

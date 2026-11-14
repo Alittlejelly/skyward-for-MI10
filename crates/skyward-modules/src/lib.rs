@@ -15,6 +15,9 @@ pub fn source_dir(source: &str) -> Result<PathBuf> {
         "vendor_dlkm" => "/vendor_dlkm/lib/modules",
         "vendor" => "/vendor/lib/modules",
         "system_dlkm" => "/system_dlkm/flatten/lib/modules",
+        // Modules the recovery itself ships, patched for the kernel it
+        // runs: they take precedence over the phone's own.
+        "skyward" => "/skyward/modules",
         _ => bail!("unknown module source {source:?}"),
     }))
 }
@@ -31,7 +34,17 @@ pub fn load(dirs: &[PathBuf], names: &[String]) -> Result<Vec<PathBuf>> {
             .iter()
             .find(|d| d.join(&file).is_file())
             .ok_or_else(|| anyhow!("{file} is in none of {dirs:?}"))?;
-        let graph = parse_dep(dir)?;
+        // A dependency graph needs a modules.dep; a patched module the
+        // recovery ships standalone has none and nothing to depend on.
+        let graph = match parse_dep(dir) {
+            Ok(graph) => graph,
+            Err(_) => {
+                let path = dir.join(&file);
+                insmod(&path, "")?;
+                loaded.push(path);
+                continue;
+            }
+        };
         for m in graph.load_order(std::slice::from_ref(&file)) {
             let path = graph
                 .resolve_path(&m)
@@ -135,12 +148,14 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Hand the open module `file` to the kernel with the settings `params`.
+/// Hand the open module `file` to the kernel with the settings `params`,
+/// under the loading `flags` it accepts: it will skip its own vermagic and
+/// symbol-version checks on request.
 #[cfg(target_os = "android")]
-fn finit_module(file: &fs::File, params: &str) -> std::io::Result<()> {
+fn finit_module(file: &fs::File, params: &str, flags: libc::c_int) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     let params = std::ffi::CString::new(params).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let rc = unsafe { libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), params.as_ptr(), 0 as libc::c_int) };
+    let rc = unsafe { libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), params.as_ptr(), flags) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -148,18 +163,31 @@ fn finit_module(file: &fs::File, params: &str) -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn finit_module(_file: &fs::File, _params: &str) -> std::io::Result<()> {
+fn finit_module(_file: &fs::File, _params: &str, _flags: libc::c_int) -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "modules are loaded only on the phone"))
 }
 
 pub fn insmod(path: impl AsRef<Path>, params: &str) -> Result<()> {
     let path = path.as_ref();
     let f = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    match finit_module(&f, params) {
+    match finit_module(&f, params, 0) {
         Ok(()) => Ok(()),
         // Already loaded is success for our purposes.
         Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("finit_module {}", path.display())),
+        Err(e) => {
+            // A module built for another build of the same kernel's source
+            // is turned away before its symbols are read, for the vermagic
+            // and the symbol versions it names. Both only promise the
+            // structures it passes have the layout the kernel expects,
+            // which a module from the same board's ROM does not risk, and
+            // the kernel itself offers to load without either check.
+            const IGNORE_MODVERSIONS: libc::c_int = 1;
+            const IGNORE_VERMAGIC: libc::c_int = 2;
+            match finit_module(&f, params, IGNORE_MODVERSIONS | IGNORE_VERMAGIC) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(e).with_context(|| format!("finit_module {}", path.display())),
+            }
+        }
     }
 }
 

@@ -76,6 +76,11 @@ enum Cmd {
         /// Its ramdisk is not used unless `ramdisk` names one.
         #[arg(long)]
         allow_foreign: bool,
+        /// Entries of the stock ramdisk to take out first, each a name or a
+        /// prefix ending in `/`: what a previous build of this recovery
+        /// left there, when it is built on an image of itself.
+        #[arg(long = "strip")]
+        strips: Vec<String>,
         /// Skyward built for the device (aarch64-linux-android).
         #[arg(long)]
         binary: PathBuf,
@@ -138,7 +143,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, kernel, ramdisk, dtbo, header, allow_foreign, binary, system_init, config, font, mono, mono_license, files, out } => {
+        Cmd::Recovery { stock, kernel, ramdisk, dtbo, header, allow_foreign, strips, binary, system_init, config, font, mono, mono_license, files, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             if let Some(header) = &header {
@@ -162,13 +167,20 @@ fn main() -> Result<()> {
             // The ramdisk as it was packed, whose compression the rebuilt one
             // keeps: a kernel reads the initramfs of the compression it was
             // built for.
+            let mut strips = strips;
             let (mut rd, original) = match &ramdisk {
                 Some(from) => {
+                    strips.clear();
                     let from = BootImage::read(from)?;
                     (Ramdisk::decode(&from.ramdisk)?, from.ramdisk)
                 }
                 None => (Ramdisk::decode(&img.ramdisk)?, img.ramdisk.clone()),
             };
+            for prefix in &strips {
+                let taken = rd.entries.iter().filter(|e| e.name.starts_with(prefix.as_str())).count();
+                rd.entries.retain(|e| !e.name.starts_with(prefix.as_str()));
+                println!("stripped {taken} entries under {prefix}");
+            }
             // A stock recovery ramdisk has no third-party tree; refuse to build
             // on top of another custom recovery.
             if !allow_foreign {
