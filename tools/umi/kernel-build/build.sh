@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # Rebuild the qcacld WLAN module (qca_cld3_qca6390) against the Fuutao kernel ABI.
 #
-# Why: the vendor module was compiled against Xiaomi's own 4.19 build of this
-# kernel. The Fuutao custom kernel changed a few CONFIGs, which shifts struct
-# layouts (net_device->dev moved by 8 bytes), so the vendor binary corrupts
-# memory. Rebuilding from source with the device's exact .config removes every
-# layout mismatch; symbol CRCs then match the running kernel by construction.
+# Kernel source: tequilaOS/platform_kernel_xiaomi_umi "uno" — a community
+# mirror of Xiaomi's own umi 4.19.157-perf tree (the stock line ends at
+# HyperOS 1; Fuutao's ROM kernel is a .config variant of this tree). The
+# device's /proc/config.gz supplies Fuutao's config.
 #
 # The kernel is only built to produce headers and Module.symvers — the kernel
-# image itself is never shipped. The module is what matters.
+# image is never shipped. The module is what matters.
 #
-# Correctness oracle (run locally after download): every symbol CRC in the
-# rebuilt module must equal the CRC in the running kernel's ksymtab (we mined
-# that table earlier; 464 of them were used to patch the vendor module).
+# CRC note: Fuutao's tree carries header modifications, so a rebuilt module's
+# genksyms CRCs can never match its kcrctab. The kernel's real CRC values are
+# proven ground truth (wlan7.ko passed enforced check_version); the module is
+# patched with them post-build (patch_crcs.py). CRC gates loading; struct
+# layout gates safety — verify via the probe + oracle pattern.
+#
+# Layout probe: offsetof(struct net_device, dev) must equal 0x4c8 — measured
+# by disassembling the device kernel's netdev_register_kobject.
 set -euo pipefail
 
 ROOT="$(pwd)"
@@ -25,44 +29,42 @@ sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev \
     gcc-9 g++-9 binutils-aarch64-linux-gnu kmod >/dev/null
 
 echo "== toolchain: proton clang 12 =="
-curl -fsSL https://codeload.github.com/ravindu644/proton-12/tar.gz/refs/heads/main \
-    -o "$ROOT/proton.tgz"
-mkdir "$ROOT/toolchain"
-tar -xzf "$ROOT/proton.tgz" -C "$ROOT/toolchain" --strip-components=1
 TC="$ROOT/toolchain/bin"
+if [ ! -d "$TC" ]; then
+    curl -fsSL https://codeload.github.com/ravindu644/proton-12/tar.gz/refs/heads/main \
+        -o "$ROOT/proton.tgz"
+    mkdir "$ROOT/toolchain"
+    tar -xzf "$ROOT/proton.tgz" -C "$ROOT/toolchain" --strip-components=1
+fi
 "$TC/clang" --version | head -1
 
 # Kernel 4.19 forces -no-integrated-as under clang, whose driver looks up a
-# bare `as` on PATH. Proton's bare `as` is the x86 one; the aarch64 assembler
-# is `aarch64-linux-gnu-as` — shim the name. Host tools must not see it: they
-# are pinned to /usr/bin via gcc's -B.
+# bare `as` on PATH and prefers tools next to its own binary. Proton's bare
+# `as`/`ld` are the x86 ones — swap both for the aarch64 versions. Host tools
+# must not see them: they are pinned to /usr/bin via gcc's -B.
 mkdir -p "$ROOT/shim"
 ln -sf "$TC/aarch64-linux-gnu-as" "$ROOT/shim/as"
-export PATH="$ROOT/shim:$TC:$PATH"
-# clang prefers tools next to its own binary over PATH, so swap the bundled
-# x86 `as` for the aarch64 one as well; ditto for `ld`, which the vdso link
-# reaches through the clang driver.
-mv "$TC/as" "$TC/as.host-x86"
+[ -L "$TC/as" ] || mv "$TC/as" "$TC/as.host-x86"
 ln -s aarch64-linux-gnu-as "$TC/as"
 ln -sf "$TC/aarch64-linux-gnu-ld" "$ROOT/shim/ld"
-mv "$TC/ld" "$TC/ld.host-x86"
+[ -L "$TC/ld" ] || mv "$TC/ld" "$TC/ld.host-x86"
+export PATH="$ROOT/shim:$TC:$PATH"
 
 echo "== sources =="
-# Kernel: Xiaomi's own umi 4.19.157-perf tree (community mirror — MiCode
-# stopped at the 4.19.81 Q-era branch, and the phone's stock line ends at
-# HyperOS 1; Fuutao's ROM kernel is a .config variant of this very tree).
-# The device's /proc/config.gz supplies Fuutao's config.
-git clone --depth 1 --branch uno \
-    https://github.com/tequilaOS/platform_kernel_xiaomi_umi.git "$ROOT/kernel"
-git clone --depth 1 --branch umi-q-oss \
-    https://github.com/MiCode/vendor_qcom_opensource_wlan.git "$ROOT/wlan"
+if [ ! -d "$ROOT/kernel/.git" ]; then
+    git clone --depth 1 --branch uno \
+        https://github.com/tequilaOS/platform_kernel_xiaomi_umi.git "$ROOT/kernel"
+fi
+if [ ! -d "$ROOT/wlan/.git" ]; then
+    git clone --depth 1 --branch umi-q-oss \
+        https://github.com/MiCode/vendor_qcom_opensource_wlan.git "$ROOT/wlan"
+fi
+grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) " "$ROOT/kernel/Makefile"
 
-# IPA is off in this build, so qdf_get_ipa_smmu_enabled() has no definition.
-# The call site is unreachable when IPA is absent (guarded by ipa_present),
-# but it must not exist in the compiled text at all — replace it with the
-# value it would return anyway.
-sed -i 's/ipa_smmu_enabled = qdf_get_ipa_smmu_enabled();/ipa_smmu_enabled = false; \/* IPA off *\//' \
-    "$ROOT/wlan/qcacld-3.0/core/cds/src/cds_api.c"
+# Mirror the device's release string exactly (read from Image_umi: vermagic
+# is 4.19.157-Fuutao-Qn_miao-gc5038e29c). Cosmetic — the kernel image is
+# never flashed.
+sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 157/' "$ROOT/kernel/Makefile"
 
 # tequilaOS's dwc3-msm.c references ps5169_cfg_usb() (USB/DP repeater) without
 # a config guard, but the device config keeps PS5169 off — the kernel link
@@ -71,17 +73,45 @@ sed -i 's/ipa_smmu_enabled = qdf_get_ipa_smmu_enabled();/ipa_smmu_enabled = fals
 # safe.
 sed -i 's/ps5169_cfg_usb();/(void)0;/' \
     "$ROOT/kernel/drivers/usb/dwc3/dwc3-msm.c"
-grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) " "$ROOT/kernel/Makefile"
 
-# Mirror the device's release string exactly (read from Image_umi: vermagic
-# is 4.19.157-Fuutao-Qn_miao-gc5038e29c). Cosmetic — the kernel image is
-# never flashed.
-sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 157/' "$ROOT/kernel/Makefile"
+# IPA is off in this build, so qdf_get_ipa_smmu_enabled() has no definition.
+# The call site is unreachable when IPA is absent (guarded by ipa_present),
+# but it must not exist in the compiled text at all — replace it with the
+# value it would return anyway.
+sed -i 's/ipa_smmu_enabled = qdf_get_ipa_smmu_enabled();/ipa_smmu_enabled = false; \/* IPA off *\//' \
+    "$ROOT/wlan/qcacld-3.0/core/cds/src/cds_api.c"
+
+# The 4.19.81-era WLAN source uses wakeup_source_init/trash, which the 157
+# kernel removed (the wakeup_source struct gained pointer name + ida ids).
+# qdf_wake_lock_t embeds the struct; callers pass persistent string literals,
+# so the old semantics map cleanly onto add/remove.
+cat > "$ROOT/wlan/qca-wifi-host-cmn/qdf/linux/src/qdf_wakeup_compat.h" <<'EOF'
+#ifndef _QDF_WAKEUP_COMPAT_H_
+#define _QDF_WAKEUP_COMPAT_H_
+#include <linux/string.h>
+#include <linux/pm_wakeup.h>
+static inline void wakeup_source_init(struct wakeup_source *ws, const char *name)
+{
+	memset(ws, 0, sizeof(*ws));
+	ws->name = name;
+	wakeup_source_add(ws);
+}
+static inline void wakeup_source_trash(struct wakeup_source *ws)
+{
+	wakeup_source_remove(ws);
+	memset(ws, 0, sizeof(*ws));
+}
+#endif
+EOF
+QDF_LOCK="$ROOT/wlan/qca-wifi-host-cmn/qdf/linux/src/qdf_lock.c"
+grep -q qdf_wakeup_compat.h "$QDF_LOCK" || sed -i '1i #include "qdf_wakeup_compat.h"' "$QDF_LOCK"
 
 echo "== kernel configuration =="
 OUT="$ROOT/kout"
 mkdir -p "$OUT"
-cp "$ROOT/tools/umi/kernel-build/futao.config" "$OUT/.config"
+if [ ! -f "$OUT/.config" ]; then
+    cp "$ROOT/tools/umi/kernel-build/futao.config" "$OUT/.config"
+fi
 
 KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
     CC="$TC/clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -100,15 +130,6 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
     --disable TOUCHSCREEN_ST_FTS_V521 \
     --disable IPA3 \
     --disable GSI
-# The oss tree's fts_521 driver does not compile (references identifiers only
-# present in Xiaomi's internal source); the device runs GOODIX anyway. It is
-# a leaf driver — disabling it cannot affect struct layouts.
-#
-# IPA3 (and its GSI component) trips GNU bfd's --gc-sections check with
-# "dangerous relocation" in __verbose; the WLAN module is built with IPA off
-# anyway (qca6390 profile) and no struct the module touches depends on it.
-# The CRC oracle verifies every symbol the module references, so any layout
-# consequence of these two disables would be caught before flashing.
 "${KMAKE[@]}" olddefconfig
 
 grep -E "^(CONFIG_LOCALVERSION|CONFIG_MODVERSIONS|CONFIG_SMP|CONFIG_PREEMPT|CONFIG_SLUB|CONFIG_ARCH_KONA)=" "$OUT/.config"
@@ -135,8 +156,9 @@ EOF
 cat > "$ROOT/probe/Kbuild" <<'EOF'
 obj-m := probe.o
 EOF
-"${KMAKE[@]}" M="$ROOT/probe" modules 2>&1 | tail -3 || { echo "FATAL: probe build failed"; exit 1; }
-"$TC/llvm-nm" "$ROOT/probe/probe.ko" | grep probe_
+"${KMAKE[@]}" M="$ROOT/probe" modules 2>&1 | tee "$ROOT/logs/probe.log" | tail -3
+"$TC/llvm-objdump" -s -j .rodata "$ROOT/probe/probe.ko" 2>/dev/null || \
+    "$TC/llvm-readelf" -x .rodata "$ROOT/probe/probe.ko" 2>/dev/null
 
 echo "== qcacld module =="
 cd "$ROOT/wlan/qcacld-3.0"
