@@ -101,10 +101,15 @@ grep -c "0x" "$OUT/Module.symvers" | head -1
 echo "== qcacld module =="
 cd "$ROOT/wlan/qcacld-3.0"
 "${KMAKE[@]}" -j"$JOBS" M="$PWD" modules \
-    MODNAME=wqld WLAN_PROFILE=qca6390 \
-    CONFIG_IPA3=n CONFIG_IPA_OFFLOAD=n \
+    MODNAME=wqld WLAN_ROOT="$PWD" WLAN_PROFILE=qca6390 \
+    CONFIG_QCA_CLD_WLAN=m CONFIG_IPA3=n CONFIG_IPA_OFFLOAD=n \
     CONFIG_ENABLE_SMMU_S1_TRANSLATION=y \
+    WLAN_DISABLE_BUILD_TAG=y \
     TARGET_BUILD_VARIANT=user 2>&1 | tee "$ROOT/logs/module.log" | grep -E "error|Error" || true
+# WLAN_ROOT and CONFIG_QCA_CLD_WLAN have no default in external-module mode —
+# the real build passes them on the command line. Without WLAN_ROOT the
+# defconfig include is fatal; without CONFIG_QCA_CLD_WLAN=m the module target
+# is silently skipped. WLAN_DISABLE_BUILD_TAG skips git-log probing.
 
 KO="$ROOT/wlan/qcacld-3.0/wqld.ko"
 test -f "$KO" || { echo "FATAL: module not built"; exit 1; }
