@@ -32,6 +32,11 @@ tar -xzf "$ROOT/proton.tgz" -C "$ROOT/toolchain" --strip-components=1
 TC="$ROOT/toolchain/bin"
 "$TC/clang" --version | head -1
 
+# Kernel 4.19 forces -no-integrated-as under clang, so the driver looks up a
+# bare `as` on PATH. Proton ships the matching aarch64 GNU as — put it first.
+# Host tools must not see it: pin them to /usr/bin via gcc's -B.
+export PATH="$TC:$PATH"
+
 echo "== sources =="
 git clone --depth 1 --branch umi-q-oss \
     https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git "$ROOT/kernel"
@@ -52,7 +57,7 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
     CC="$TC/clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
     LD="$TC/ld.lld" AR="$TC/llvm-ar" NM="$TC/llvm-nm"
     OBJCOPY="$TC/llvm-objcopy" OBJDUMP="$TC/llvm-objdump" STRIP="$TC/llvm-strip"
-    HOSTCC=gcc-9 HOSTCXX=g++-9 KCFLAGS=-Wno-error)
+    HOSTCC="gcc-9 -B/usr/bin/" HOSTCXX="g++-9 -B/usr/bin/" KCFLAGS=-Wno-error)
 
 "${KMAKE[@]}" olddefconfig
 
