@@ -48,8 +48,12 @@ ln -sf "$TC/aarch64-linux-gnu-ld" "$ROOT/shim/ld"
 mv "$TC/ld" "$TC/ld.host-x86"
 
 echo "== sources =="
-git clone --depth 1 --branch umi-q-oss \
-    https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git "$ROOT/kernel"
+# Kernel: Xiaomi's own umi 4.19.157-perf tree (community mirror — MiCode
+# stopped at the 4.19.81 Q-era branch, and the phone's stock line ends at
+# HyperOS 1; Fuutao's ROM kernel is a .config variant of this very tree).
+# The device's /proc/config.gz supplies Fuutao's config.
+git clone --depth 1 --branch uno \
+    https://github.com/tequilaOS/platform_kernel_xiaomi_umi.git "$ROOT/kernel"
 git clone --depth 1 --branch umi-q-oss \
     https://github.com/MiCode/vendor_qcom_opensource_wlan.git "$ROOT/wlan"
 
@@ -61,8 +65,8 @@ sed -i 's/ipa_smmu_enabled = qdf_get_ipa_smmu_enabled();/ipa_smmu_enabled = fals
     "$ROOT/wlan/qcacld-3.0/core/cds/src/cds_api.c"
 grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL) " "$ROOT/kernel/Makefile"
 
-# The device kernel reports 4.19.157; the oss tree is at 4.19.81. Bump
-# SUBLEVEL so the vermagic matches (cosmetic — we never flash this kernel).
+# Mirror the device's release number for vermagic (cosmetic — the kernel
+# image is never flashed).
 sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 157/' "$ROOT/kernel/Makefile"
 
 echo "== kernel configuration =="
@@ -104,6 +108,26 @@ echo "== kernel build (produces headers + Module.symvers) =="
 "${KMAKE[@]}" -j"$JOBS" all 2>&1 | tee "$ROOT/logs/kernel.log" | grep -E "error|Error" || true
 test -f "$OUT/Module.symvers" || { echo "FATAL: Module.symvers missing"; exit 1; }
 grep -c "0x" "$OUT/Module.symvers" | head -1
+
+echo "== layout probe =="
+# Direct struct-layout check against the running kernel: Fuutao's
+# netdev_register_kobject reaches &ndev->dev at net_device+0x4c8 (measured by
+# disassembling the device kernel). If our probe disagrees, the tree+config
+# pair still diverges — the CRC oracle would be moot.
+mkdir -p "$ROOT/probe"
+cat > "$ROOT/probe/probe.c" <<'EOF'
+#include <linux/netdevice.h>
+#include <linux/skbuff.h>
+#include <linux/stddef.h>
+const unsigned long probe_net_dev_off = offsetof(struct net_device, dev);
+const unsigned long probe_skb_len_off = offsetof(struct sk_buff, len);
+const unsigned long probe_skb_cb_off = offsetof(struct sk_buff, cb);
+EOF
+cat > "$ROOT/probe/Kbuild" <<'EOF'
+obj-m := probe.o
+EOF
+"${KMAKE[@]}" M="$ROOT/probe" modules 2>&1 | tail -3 || { echo "FATAL: probe build failed"; exit 1; }
+"$TC/llvm-nm" "$ROOT/probe/probe.ko" | grep probe_
 
 echo "== qcacld module =="
 cd "$ROOT/wlan/qcacld-3.0"
