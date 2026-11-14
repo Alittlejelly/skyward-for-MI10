@@ -78,7 +78,8 @@ KMAKE=(make -C "$ROOT/kernel" O="$OUT" ARCH=arm64
     --disable LOCALVERSION_AUTO \
     --disable DEBUG_INFO \
     --disable TOUCHSCREEN_ST_FTS_V521 \
-    --disable IPA3
+    --disable IPA3 \
+    --disable GSI
 # The oss tree's fts_521 driver does not compile (references identifiers only
 # present in Xiaomi's internal source); the device runs GOODIX anyway. It is
 # a leaf driver — disabling it cannot affect struct layouts.
