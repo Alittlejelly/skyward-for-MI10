@@ -40,9 +40,12 @@ mkdir -p "$ROOT/shim"
 ln -sf "$TC/aarch64-linux-gnu-as" "$ROOT/shim/as"
 export PATH="$ROOT/shim:$TC:$PATH"
 # clang prefers tools next to its own binary over PATH, so swap the bundled
-# x86 `as` for the aarch64 one as well.
+# x86 `as` for the aarch64 one as well; ditto for `ld`, which the vdso link
+# reaches through the clang driver.
 mv "$TC/as" "$TC/as.host-x86"
 ln -s aarch64-linux-gnu-as "$TC/as"
+ln -sf "$TC/aarch64-linux-gnu-ld" "$ROOT/shim/ld"
+mv "$TC/ld" "$TC/ld.host-x86"
 
 echo "== sources =="
 git clone --depth 1 --branch umi-q-oss \
