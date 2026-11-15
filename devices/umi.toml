@@ -169,6 +169,14 @@ libraries = ["/vendor/lib64", "/system/lib64"]
 service = "android.hardware.wifi.supplicant.ISupplicant/default"
 probe = "http://connect.rom.miui.com/generate_204"
 firmware = [
+    # The driver asks for these two names first, and only then for the ones
+    # under the chip's own directory. The installed system answers the first
+    # pair from a symbolic link that is dead on this build, so only the second
+    # pair ever reaches it; here both are placed, and the first pair is what
+    # the driver actually reads. Without the address file it gives the
+    # interface a random one on every boot.
+    { name = "wlan/qca_cld/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/qca6390/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/qca_cld/wlan_mac.bin", partition = "persist", path = "wlan_mac.bin" },
     { name = "wlan/qca_cld/qca6390/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/qca6390/WCNSS_qcom_cfg.ini" },
     { name = "wlan/qca_cld/qca6390/wlan_mac.bin", partition = "persist", path = "wlan_mac.bin" },
     # The chip's own firmware and its board data, which cnss reads with
