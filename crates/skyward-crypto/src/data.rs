@@ -103,9 +103,7 @@ fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
     let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
     let device = skyward_block::fstab::device(entry)?;
-    let Some(encryption) = Encryption::of(entry)? else {
-        return Ok((entries, PathBuf::from(device)));
-    };
+    let encryption = Encryption::of(entry)?;
     let key = storage_key(service, entry, &encryption)?;
     let sectors = skyward_block::size_bytes(&device)? / 512;
     let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
