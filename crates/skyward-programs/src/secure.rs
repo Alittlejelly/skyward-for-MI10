@@ -388,6 +388,8 @@ fn started(phone: &Phone, program: &Program, ready: Ready, registers: Vec<String
         path: phone.started_from(&program.path),
         args: program.args.clone(),
         libraries: libraries_of(&program.path, phone.bundle.as_deref()),
+        own_libraries: false,
+        root: None,
         oneshot: false,
         ready_property,
         ready_service,
