@@ -440,7 +440,7 @@ fn command(s: &Service, who: &Credentials) -> Result<Command> {
 
 /// The top of a tree, as a C string the child may use after the fork.
 fn c_root() -> *const libc::c_char {
-    c"/".as_ptr()
+    b"/\0".as_ptr().cast()
 }
 
 /// Lock in memory every file the running programs have mapped or open on
