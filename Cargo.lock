@@ -2439,12 +2439,8 @@ dependencies = [
  "cpio",
  "flate2",
  "libc",
-<<<<<<< HEAD
- "lz4_flex",
- "sha1 0.10.7",
-=======
  "lz4_flex 0.14.0",
->>>>>>> upstream-tmp/main
+ "sha1 0.10.7",
  "tempfile",
 ]
 

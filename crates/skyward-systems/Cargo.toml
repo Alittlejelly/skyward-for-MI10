@@ -22,8 +22,3 @@ skyward-config = { path = "../skyward-config" }
 [dev-dependencies]
 abootimg-oxide = "0.5.2"
 tempfile = "3.27.0"
-
-[target.'cfg(target_os = "android")'.dependencies]
-# Where a second system's first program starts on the phone, which only the
-# phone asks.
-skyward-config = { path = "../skyward-config" }
