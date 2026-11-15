@@ -1189,6 +1189,9 @@ pub struct App {
     backdrop: Option<Canvas>,
     /// How round the screen's corners are, in pixels.
     corners: f32,
+    /// How far from the screen's left edge the clock starts, in pixels: past
+    /// the punch-hole camera, where the panel has one.
+    status_inset: f32,
     dirty: bool,
     w: u32,
     h: u32,
@@ -1255,6 +1258,7 @@ impl App {
             cols: 0,
             backdrop: None,
             corners: 0.0,
+            status_inset: 0.0,
             dirty: true,
             w,
             h,
@@ -1266,6 +1270,12 @@ impl App {
     /// leading corners of a page sliding over another.
     pub fn set_screen_corners(&mut self, radius: f32) {
         self.corners = radius;
+    }
+
+    /// The status bar's clock starts `dp` from the screen's left edge: past
+    /// the punch-hole camera, where the panel has one.
+    pub fn set_status_inset(&mut self, dp: f32) {
+        self.status_inset = dp * self.px_per_dp;
     }
 
     pub fn theme(&self) -> Theme {
