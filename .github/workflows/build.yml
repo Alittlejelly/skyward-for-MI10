@@ -7,7 +7,7 @@ name: Build
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
+    tags: ["v*", "umi-v*"]
   workflow_dispatch:
     inputs:
       device:
