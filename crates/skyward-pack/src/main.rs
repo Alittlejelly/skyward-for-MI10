@@ -19,6 +19,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// The subcommands differ in how many options they take, which is the point of
+// them: `recovery` names fifteen, `list` one. A command line is parsed once
+// per run, so the memory the largest variant costs is of no concern.
+#[expect(clippy::large_enum_variant, reason = "one parse per run; the variants are a command line")]
 enum Cmd {
     /// Print an image's header and the files in its ramdisk.
     List { image: PathBuf },
