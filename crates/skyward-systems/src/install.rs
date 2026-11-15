@@ -166,6 +166,12 @@ mod sys {
 
     /// The program the other system starts with: this recovery's own.
     fn program() -> PathBuf {
+        program_where()
+    }
+
+    /// [`program`] as a test reads it, without the rest of the phone's own
+    /// code having to be there.
+    pub fn program_where() -> PathBuf {
         Path::new("/").join(skyward_config::ramdisk::SYSTEM_INIT)
     }
 
@@ -381,6 +387,14 @@ mod tests {
     fn the_room_for_a_root_keeps_a_supers_worth_for_updates() {
         assert_eq!(room(59 * GB, 600 << 20, 9 * GB), 59 * GB - (600 << 20) - 9 * GB - HEADER);
         assert_eq!(room(GB, 0, 9 * GB), 0, "none to spare");
+    }
+
+    /// Where a second system's first program starts is the recovery's own
+    /// path in its ramdisk, which only the phone's build reads.
+    #[cfg(target_os = "android")]
+    #[test]
+    fn the_program_to_start_is_the_one_beside_this_recovery() {
+        assert_eq!(sys::program_where(), Path::new("/").join(skyward_config::ramdisk::SYSTEM_INIT));
     }
 
     #[test]

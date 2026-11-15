@@ -11,7 +11,6 @@ serde = { workspace = true }
 sha2 = "0.10.9"
 skyward-block = { path = "../skyward-block" }
 skyward-bootimg = { path = "../skyward-bootimg" }
-skyward-config = { path = "../skyward-config" }
 skyward-vab = { path = "../skyward-vab" }
 toml = { workspace = true }
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -19,3 +18,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 [dev-dependencies]
 abootimg-oxide = "0.5.2"
 tempfile = "3.27.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Where a second system's first program starts on the phone, which only the
+# phone asks.
+skyward-config = { path = "../skyward-config" }
