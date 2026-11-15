@@ -2489,7 +2489,9 @@ dependencies = [
  "libc",
  "skyward-block",
  "skyward-bootimg",
+ "skyward-modules",
  "skyward-sys",
+ "skyward-systems",
 ]
 
 [[package]]
