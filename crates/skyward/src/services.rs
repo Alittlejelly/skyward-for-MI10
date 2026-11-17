@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use procfs::process::{FDTarget, MMapPath, Process};
 use skyward_config::Service;
 use skyward_programs::script::{Socket, SocketKind};
@@ -198,13 +198,21 @@ const LIBRARY_PATH: &str = "LD_LIBRARY_PATH";
 ///
 /// `libraries` is a directory of shared libraries every one of them may
 /// need, searched after whatever it names itself.
-pub fn start(programs: &[Started], libraries: Option<&Path>) -> Result<()> {
+pub fn start(programs: &[Started], libraries: &[PathBuf]) -> Result<()> {
     let known = accounts();
     for program in programs {
         let (s, who, given) = readied(program, libraries, &known)?;
         if s.oneshot {
             let status = to_its_end(&s, &who, &given)?;
-            ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
+            // Init goes on however a program its scripts run ends, and so
+            // does the recovery. These are the installed system's scripts,
+            // and one that returns non-zero in a recovery — because it wants
+            // a partition, a property or a program only that system has — is
+            // no reason to leave every program after it unstarted, the WLAN's
+            // housekeeping among them.
+            if !status.success() {
+                skyward_sys::kmsg(&format!("{} {} ended: {status}", s.path, s.args.join(" ")))?;
+            }
             skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
             continue;
         }
@@ -222,7 +230,15 @@ pub fn start(programs: &[Started], libraries: Option<&Path>) -> Result<()> {
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
         thread::Builder::new().name(name).spawn(move || supervise(&s, &who, &given)).context("start a supervising thread")?;
-        ready(&waiting)?;
+        // A program that does not come up in time is said in the kernel log
+        // and the next one is started anyway: init starts every service it is
+        // told of whether an earlier one runs or not, and a program that
+        // wants something only the installed system has — the secure world's
+        // key service among them — is no reason to leave the programs that
+        // have nothing to do with it unstarted.
+        if let Err(e) = ready(&waiting) {
+            skyward_sys::kmsg(&format!("{} is not ready: {e:#}", waiting.path))?;
+        }
     }
     Ok(())
 }
@@ -232,7 +248,7 @@ pub fn start(programs: &[Started], libraries: Option<&Path>) -> Result<()> {
 /// program ends, init goes on, and so may whoever asks here. It runs as
 /// [`start`] runs one, finding its libraries in the folders it names.
 pub fn once(program: &Started) -> Result<ExitStatus> {
-    let (s, who, given) = readied(program, None, &accounts())?;
+    let (s, who, given) = readied(program, &[], &accounts())?;
     to_its_end(&s, &who, &given)
 }
 
@@ -244,12 +260,12 @@ fn accounts() -> HashMap<String, u32> {
 /// What `program` is started with, worked out before it is: the program
 /// itself, which has to be there, with `libraries` after its own, who it
 /// runs as and what init hands it.
-fn readied(program: &Started, libraries: Option<&Path>, known: &HashMap<String, u32>) -> Result<(Service, Credentials, Given)> {
+fn readied(program: &Started, libraries: &[PathBuf], known: &HashMap<String, u32>) -> Result<(Service, Credentials, Given)> {
     let mut s = program.service.clone();
     if !Path::new(&s.path).is_file() {
         bail!("{} is missing; is its partition mounted?", s.path);
     }
-    if let Some(dir) = libraries {
+    for dir in libraries {
         s.libraries.push(dir.to_string_lossy().into_owned());
     }
     let who = Credentials::of(&s, known)?;
@@ -496,6 +512,7 @@ fn ready(s: &Service) -> Result<()> {
 }
 
 fn supervise(s: &Service, who: &Credentials, given: &Given) -> ! {
+    let mut quick: u32 = 0;
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
@@ -557,8 +574,11 @@ fn command(s: &Service, who: &Credentials, given: &Given, handed: &[(String, Own
     for (variable, socket) in handed {
         cmd.env(variable, socket.as_raw_fd().to_string());
     }
-    let root = match &s.root {
-        Some(path) => Some(std::ffi::CString::new(path.as_os_str().as_bytes()).context("a NUL in the path")?),
+    // A path with a NUL in it cannot be handed to the call that runs the
+    // program; the call fails on it anyway, so the root is left unset and
+    // the program runs where it is.
+    let _root = match &s.root {
+        Some(path) => std::ffi::CString::new(path.as_os_str().as_bytes()).ok(),
         None => None,
     };
     let who = who.clone();

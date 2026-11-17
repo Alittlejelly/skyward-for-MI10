@@ -313,9 +313,25 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
     // The first it does not know described settles that it starts again.
     let mut unknown = false;
     for name in wanted {
-        if !skyward_binder::service::declared(&binder, name).with_context(|| format!("ask the service directory whether it knows {name} described"))? {
-            unknown = true;
-            break;
+        match skyward_binder::service::declared(&binder, name) {
+            Ok(true) => {}
+            Ok(false) => {
+                unknown = true;
+                break;
+            }
+            // A name the directory does not answer for is one it does not
+            // know described either. It is asked of what the phone's own
+            // programs register, and a HIDL service — the WLAN's supplicant
+            // among them — registers with the hardware directory beside this
+            // one, which refuses the question outright. The directory starts
+            // again below and reads the descriptions written above whether it
+            // answered or not, and nothing after this waits on the answer, so
+            // the refusal changes nothing but a line in the kernel log.
+            Err(e) => {
+                let _ = skyward_sys::kmsg(&format!("the service directory does not answer for {name} described: {e:#}"));
+                unknown = true;
+                break;
+            }
         }
     }
     if unknown || rewritten > 0 {

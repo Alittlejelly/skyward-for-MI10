@@ -37,6 +37,14 @@ pub fn split_options(options: &[String]) -> (u64, String) {
     let mut flags = 0;
     let mut own = Vec::new();
     for word in options.iter().filter(|w| !w.is_empty()) {
+        if word.starts_with("context=") || word.starts_with("fscontext=") {
+            // A recovery labels nothing it mounts, and a label the policy it
+            // carries does not know makes the kernel refuse the mount of a
+            // vfat partition outright with EINVAL, which the phone's own
+            // fstab asks for on the firmware partition. The option has
+            // nothing to do here, so it is left out rather than passed on.
+            continue;
+        }
         match FLAGS.iter().find(|(name, _)| name == word) {
             Some((_, bit)) => flags |= bit,
             None => own.push(word.as_str()),

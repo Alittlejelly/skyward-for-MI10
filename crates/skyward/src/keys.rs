@@ -9,7 +9,7 @@ use skyward_config::Service;
 use skyward_programs::naming::{self, Does};
 use skyward_programs::phone::{self, Partition, Phone, PARTITIONS};
 use skyward_programs::secure::{self, Step};
-use std::path::Path;
+use std::path::PathBuf;
 
 /// What the partitions of an installed system say that the recovery acts
 /// on.
@@ -33,7 +33,7 @@ pub struct Found {
 /// `libraries` is where the libraries the phone's partitions were built
 /// against are opened, on a phone that carries them as a bundle of their
 /// own: each of its programs is given the folder among its own.
-pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Found> {
+pub fn found(slot: skyward_vab::Slot, libraries: &[PathBuf]) -> Result<Found> {
     let mut phone = read(slot, libraries)?;
     let unnamed = naming::steps(&phone)?;
     if !unnamed.is_empty() {
@@ -48,7 +48,7 @@ pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Found>
 /// bootloader's, with those the recovery has set beside them as the
 /// phone's init sets them, and the installed build's. `libraries` is as
 /// [`found`] takes it.
-fn read(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Phone> {
+fn read(slot: skyward_vab::Slot, libraries: &[PathBuf]) -> Result<Phone> {
     let properties = skyward_info::installed_props(slot)?;
     let mounted = skyward_vab::mounted_partitions(slot)?;
     let mut partitions = Vec::new();
@@ -57,7 +57,7 @@ fn read(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Phone> {
         let partition = mounted.iter().find(|m| m.partition == named).with_context(|| format!("{named} is not mounted"))?;
         partitions.push(Partition::mounted(name, &partition.mount_point));
     }
-    Phone::read(partitions, properties, libraries)
+    Phone::read(partitions, properties, libraries.first().map(PathBuf::as_path))
 }
 
 /// Do what the phone's init does to name the builds its partitions
@@ -102,7 +102,7 @@ pub fn serves_elements(steps: &[Step]) -> bool {
 pub fn start(steps: &[Step]) -> Result<()> {
     for step in steps {
         match step {
-            Step::Start(program) => crate::services::start(std::slice::from_ref(program.as_ref()), None)?,
+            Step::Start(program) => crate::services::start(std::slice::from_ref(program.as_ref()), &[])?,
             Step::ServeElements => {
                 let readers = skyward_omapi::start()?;
                 skyward_sys::kmsg(&format!("{} is served, with a reader for each of {} secure elements: {}", skyward_omapi::SERVICE, readers.len(), readers.join(", ")))?;

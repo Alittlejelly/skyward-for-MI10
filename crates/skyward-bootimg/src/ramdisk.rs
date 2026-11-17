@@ -60,6 +60,12 @@ impl Ramdisk {
         let mut cpio = Vec::new();
         if compressed.starts_with(&[0x1f, 0x8b]) {
             flate2::read::GzDecoder::new(compressed).read_to_end(&mut cpio).context("gzip decode")?;
+        } else if compressed.starts_with(b"070701") || compressed.starts_with(b"070702") {
+            // A boot image dumped off a phone keeps the ramdisk as a bare
+            // newc archive: nothing packed it, so nothing unpacks it.
+            cpio = compressed.to_vec();
+        } else if compressed.starts_with(&LZ4_LEGACY_MAGIC.to_le_bytes()) {
+            cpio = unpack_legacy_lz4(compressed).context("lz4 legacy decode")?;
         } else {
             lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
         }
@@ -170,7 +176,10 @@ impl Ramdisk {
     }
 
     /// Point `name` to `target`: a link already there is pointed anew, and
-    /// otherwise a root-owned link is added, creating missing parent
+    /// anything else already there — a file a third-party recovery shipped
+    /// under the name the recovery keeps for its own — is replaced by the
+    /// link, as the entry it held belongs to the recovery being built.
+    /// Otherwise a root-owned link is added, creating missing parent
     /// directories.
     pub fn link(&mut self, name: &str, target: &str) -> Result<()> {
         match self.entries.iter_mut().find(|e| e.name == name) {
@@ -178,7 +187,13 @@ impl Ramdisk {
                 e.data = target.as_bytes().to_vec();
                 Ok(())
             }
-            Some(_) => bail!("{name} is in the ramdisk and is not a link"),
+            Some(e) => {
+                e.mode = S_IFLNK | LINK_MODE;
+                e.data = target.as_bytes().to_vec();
+                // A link owns no file of its own, whatever the entry was.
+                e.rdev = (0, 0);
+                Ok(())
+            }
             None => self.insert(name, S_IFLNK | LINK_MODE, target.as_bytes().to_vec()),
         }
     }
@@ -284,6 +299,30 @@ fn set_time(_path: &Path, _mtime: u32) -> Result<()> {
 #[cfg(not(unix))]
 fn unpack(_e: &Entry, _path: &Path) -> Result<()> {
     bail!("unpacking a ramdisk needs a host that gives each file its owner, its mode and its time")
+}
+
+/// Unpack what [`lz4_legacy`] made, which is what a phone's own initramfs
+/// unpacker reads: the magic number, then each block as one bare LZ4 block
+/// whose room the packing fixed at [`LZ4_LEGACY_BLOCK`], the last one short.
+fn unpack_legacy_lz4(input: &[u8]) -> Result<Vec<u8>> {
+    let magic = LZ4_LEGACY_MAGIC.to_le_bytes();
+    let mut rest = input.strip_prefix(&magic[..]).context("not legacy LZ4 framing")?;
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        // Each block carries its unpacked length in a four-byte header, as
+        // `lz4 -l` writes them.
+        if rest.len() < 4 {
+            bail!("a legacy LZ4 block ends before its length");
+        }
+        let (header, body) = rest.split_at(4);
+        let room = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let packed = body.len().min(room);
+        let (block, tail) = body.split_at(packed);
+        let chunk = lz4_flex::block::decompress(block, room).context("unpack a legacy LZ4 block")?;
+        out.extend_from_slice(&chunk);
+        rest = tail;
+    }
+    Ok(out)
 }
 
 /// The legacy LZ4 framing's magic number.

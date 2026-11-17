@@ -1351,7 +1351,7 @@ impl<'a> Pages<'a> {
         // The home page tells of a restart into the slot the system does not
         // run from now: an update or a switch left for the next boot.
         if info.slot.is_some() {
-            app.set_boot_slots(read_slots());
+            app.set_boot_slots(read_slots(cfg.device.ab));
         }
         app.set_asked(asked(&request));
         let screen = Canvas::new(w, h);
@@ -1597,9 +1597,9 @@ impl<'a> Pages<'a> {
             let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
             let libraries = secure::libraries().unwrap_or_else(|e| {
                 let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
-                None
+                Vec::new()
             });
-            self.wlan = Some(wlan::Worker::start(w.clone(), modules, libraries, self.servers.clone())?);
+            self.wlan = Some(wlan::Worker::start(w.clone(), modules, libraries.into_iter().next(), self.servers.clone())?);
         }
         self.scanned_at = Instant::now();
         self.app.state.update_server = cfg.update.is_some();
@@ -2585,7 +2585,7 @@ impl Pages<'_> {
             }
             Effect::Cancel => self.cancel_install(now)?,
             Effect::ReadMounts => self.app.set_mounts(self.mounts()),
-            Effect::ReadSlots => self.app.set_boot_slots(read_slots()),
+            Effect::ReadSlots => self.app.set_boot_slots(read_slots(self.cfg.device.ab)),
             Effect::SetSlot(slot) => self.app.slot_switched(set_slot(slot), now),
             Effect::ReadSystems => self.systems()?.send(systems::Task::Read),
             // An install still under way may yet write the boot
@@ -2648,7 +2648,7 @@ impl Pages<'_> {
                 }
                 // An update in the other slot starts with that slot,
                 // which a system's updater may not have set yet.
-                self.app.set_boot_slots(read_slots());
+                self.app.set_boot_slots(read_slots(self.cfg.device.ab));
             }
             Effect::Merge => {
                 ensure!(self.merger.is_none(), "the update is being merged already");

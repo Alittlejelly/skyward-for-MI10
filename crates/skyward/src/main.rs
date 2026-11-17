@@ -331,15 +331,15 @@ fn main() -> Result<()> {
             let props = skyward_info::installed_props(slot)?;
             let services: Vec<Started> = DeviceConfig::load(&config)?.services.into_iter().filter(|s| s.runs_on(&props)).map(Started::from).collect();
             let libraries = secure::libraries()?;
-            services::start(&services, libraries.as_deref())?;
-            keys::start(&keys::found(slot, libraries.as_deref())?.steps?)?;
+            services::start(&services, &libraries)?;
+            keys::start(&keys::found(slot, &libraries)?.steps?)?;
             loop {
                 std::thread::park();
             }
         }
         #[cfg(target_os = "android")]
         Cmd::Keys => {
-            for line in keys::describe(&keys::found(booted_slot()?, secure::libraries()?.as_deref())?.steps?) {
+            for line in keys::describe(&keys::found(booted_slot()?, &secure::libraries()?)?.steps?) {
                 println!("{line}");
             }
             Ok(())
@@ -537,7 +537,7 @@ fn main() -> Result<()> {
             // keys are read from the partitions again, as it read them;
             // where they do not show, it started none.
             let mut programs = cfg.services.clone();
-            match booted_slot().and_then(|slot| keys::found(slot, secure::libraries()?.as_deref())?.steps) {
+            match booted_slot().and_then(|slot| keys::found(slot, &secure::libraries()?)?.steps) {
                 Ok(steps) => programs.extend(keys::programs(&steps)),
                 Err(e) => eprintln!("the programs of the phone's keys are not known: {e:#}"),
             }
@@ -678,15 +678,27 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     let mut told = registering.clone();
     told.extend(described.into_iter().filter(|name| !registering.contains(name)));
     if !told.is_empty() {
-        secure::publish_descriptions(&told)?;
-        skyward_sys::kmsg(&format!("the service directory is told of {} of the phone's own services", told.len()))?;
+        // The programs this recovery keeps running come after this, and
+        // whether the directory takes the descriptions or not decides only
+        // whether a service the recovery starts later is found by name.
+        // Nothing that starts here waits on it, so a directory that will not
+        // be told is said in the kernel log and the phone's own programs are
+        // started anyway, as a recovery without them can do far less.
+        match secure::publish_descriptions(&told) {
+            Ok(()) => {
+                skyward_sys::kmsg(&format!("the service directory is told of {} of the phone's own services", told.len()))?;
+            }
+            Err(e) => {
+                skyward_sys::kmsg(&format!("the service directory is not told of the phone's own services: {e:#}"))?;
+            }
+        }
     }
     let libraries = secure::libraries()?;
-    if let Some(libraries) = &libraries {
+    if !libraries.is_empty() {
         let shown: Vec<String> = libraries.iter().map(|p| p.display().to_string()).collect();
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", shown.join(", ")))?;
     }
-    services::start(&services, libraries.as_deref())?;
+    services::start(&services, &libraries)?;
     let steps = found.context("make out from the phone's partitions how its keys are used")?;
     for line in keys::describe(&steps) {
         skyward_sys::kmsg(&format!("for the phone's keys: {}", line.replace("\n  ", ", ")))?;
@@ -950,7 +962,7 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_co
             for m in &mounts.partitions {
                 skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
             }
-            let found = secure::libraries().and_then(|libraries| keys::found(slot, libraries.as_deref()));
+            let found = secure::libraries().and_then(|libraries| keys::found(slot, &libraries));
             let steps = found.as_ref().ok().and_then(|found| found.steps.as_deref().ok());
             let programs = steps.map(keys::programs).unwrap_or_default();
             // Without them the screen still shows and the keys still work,

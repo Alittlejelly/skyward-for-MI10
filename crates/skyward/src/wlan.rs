@@ -633,19 +633,27 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
     let _ = fs::create_dir_all("/data/vendor/wifi/sockets");
     let net = Path::new("/sys/class/net").join(&cfg.interface);
     if !net.exists() {
+        // The file system's readiness is written first, before the driver is
+        // told to load: cnss2 reads it as it probes, and a write that lands
+        // once the chip is already in MISSION_MODE asks it to start a cold
+        // boot calibration it cannot start. `fs_ready` sits at the head of
+        // `writes` for that reason, and the rest follow the firmware below.
+        if let Some(ready) = cfg.writes.iter().find(|w| w.path.ends_with("/fs_ready")) {
+            let _ = fs::write(&ready.path, &ready.value).with_context(|| format!("write {} to {}", ready.value, ready.path));
+        }
         for file in &cfg.firmware {
             place(file)?;
         }
         for path in skyward_modules::load(modules, &cfg.modules)? {
             skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
         }
-        // The chip's housekeeping, a thread of the driver itself, waits for
-        // this word before it powers the chip up: a driver built into the
-        // kernel has probed long before a recovery starts, so this is what
-        // starts a power-up, not a driver of its own loaded above. The write
-        // blocks until the word is taken, and a driver with no file to take
-        // it has already been told.
-        for w in &cfg.writes {
+        // The rest: the chip's housekeeping, a thread of the driver itself,
+        // waits for this word before it powers the chip up. A driver built
+        // into the kernel has probed long before a recovery starts, so this
+        // is what starts a power-up, not a driver of its own loaded above.
+        // The write blocks until the word is taken, and a driver with no file
+        // to take it has already been told.
+        for w in cfg.writes.iter().filter(|w| !w.path.ends_with("/fs_ready")) {
             let _ = fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path));
         }
         let until = Instant::now() + INTERFACE_WAIT;
