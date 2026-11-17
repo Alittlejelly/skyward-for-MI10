@@ -280,8 +280,19 @@ fn bundle(name: &str) -> Result<Option<PathBuf>> {
     let Some(file) = BUNDLE_DIRS.iter().map(|d| Path::new(d).join(format!("{name}.apex"))).find(|p| p.is_file()) else {
         return Ok(None);
     };
-    let (offset, length) = image(&file)?;
-    let device = skyward_block::loopdev::attach(&file, offset, length)?;
+    // The installer must release the installed system's partitions before
+    // replacing them. A loop device backed by an APEX on one of those
+    // partitions holds that filesystem busy even when no process has a file
+    // open there. Keep the bundle on recovery's rootfs before attaching it,
+    // so its libraries remain available without pinning the source partition.
+    let cached = Path::new("/skyward/apex-files");
+    fs::create_dir_all(cached).context("make the recovery's bundle cache")?;
+    let copy = cached.join(format!("{name}.apex"));
+    let pending = cached.join(format!("{name}.apex.partial"));
+    fs::copy(&file, &pending).with_context(|| format!("copy {} into recovery memory", file.display()))?;
+    fs::rename(&pending, &copy).with_context(|| format!("finish copying {}", file.display()))?;
+    let (offset, length) = image(&copy)?;
+    let device = skyward_block::loopdev::attach(&copy, offset, length)?;
     fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
     skyward_block::mount::mount_ro(&device, &at)?;
     Ok(Some(at))
