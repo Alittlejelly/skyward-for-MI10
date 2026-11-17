@@ -103,6 +103,14 @@ fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
     let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
     let device = skyward_block::fstab::device(entry)?;
+    // A phone may keep the partition itself as it lies and encrypt only what
+    // each user's own files hold, as this one does: its table names no
+    // metadata_encryption, so there is no key to unwrap and no device to map.
+    // The partition is read where it lies, and what of it is a user's own
+    // stays closed until that user's key is let in.
+    if entry.extra("metadata_encryption").is_none() {
+        return Ok((entries, PathBuf::from(device)));
+    }
     let encryption = Encryption::of(entry)?;
     let key = storage_key(service, entry, &encryption)?;
     let sectors = skyward_block::size_bytes(&device)? / 512;

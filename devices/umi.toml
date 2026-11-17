@@ -59,7 +59,7 @@ mounted = ["persist"]
 path = "/vendor/bin/sh"
 args = ["/vendor/bin/init.qcom.post_boot.sh"]
 own_libraries = true
-libraries = ["/apex/com.android.vndk.v30/lib64", "/apex/com.android.i18n/lib64", "/skyward/libs", "/system/lib64", "/vendor/lib64"]
+libraries = ["/vendor/lib64", "/system/lib64"]
 oneshot = true
 user = "root"
 groups = ["root", "system", "wakelock", "graphics"]
@@ -90,16 +90,10 @@ libraries = ["/system_ext/lib64", "/system/lib64"]
 user = "system"
 groups = ["system", "readproc"]
 
-# The key service, which is the only thing that can use the keys the phone
-# wrapped in hardware. The one this build of the hardware carries speaks
-# the older interface, and registers it with the directory above.
-[[service]]
-path = "/vendor/bin/hw/android.hardware.keymaster@4.1-service-qti"
-own_libraries = true
-libraries = ["/apex/com.android.vndk.v30/lib64", "/apex/com.android.i18n/lib64", "/skyward/libs", "/system/lib64", "/vendor/lib64"]
-ready_hardware_service = "android.hardware.keymaster@4.1::IKeymasterDevice/default"
-user = "system"
-groups = ["system", "drmrpc"]
+# The key service is already started by the recovery's own init from the
+# vendor service description. This build carries and runs the 4.0 service;
+# starting the 4.1 binary again only has it abort and makes every service
+# after it wait the full readiness timeout before it may start.
 # The credential service: it is what the secure world has check a screen
 # lock, and the only thing that can hand out the note the key service wants
 # before it will use a key a screen lock guards.
@@ -164,8 +158,8 @@ writes = [
     { path = "/dev/wlan", value = "ON\n" },
 ]
 interface = "wlan0"
-supplicant = "/skyward/mwlibs/wpa_supplicant_mainline"
-libraries = ["/skyward/mwlibs", "/system/lib64", "/vendor/lib64"]
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/apex/com.android.vndk.v30/lib64", "/vendor/lib64", "/system/lib64"]
 service = "android.hardware.wifi.supplicant.ISupplicant/default"
 probe = "http://connect.rom.miui.com/generate_204"
 firmware = [
@@ -175,8 +169,6 @@ firmware = [
     # pair ever reaches it; here both are placed, and the first pair is what
     # the driver actually reads. Without the address file it gives the
     # interface a random one on every boot.
-    { name = "wlan/qca_cld/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/qca6390/WCNSS_qcom_cfg.ini" },
-    { name = "wlan/qca_cld/wlan_mac.bin", partition = "persist", path = "wlan_mac.bin" },
     { name = "wlan/qca_cld/qca6390/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/qca6390/WCNSS_qcom_cfg.ini" },
     { name = "wlan/qca_cld/qca6390/wlan_mac.bin", partition = "persist", path = "wlan_mac.bin" },
     # The chip's own firmware and its board data, which cnss reads with

@@ -718,6 +718,19 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
         fs::remove_file(&socket).with_context(|| format!("take away {}", socket.display()))?;
     }
     let mut path: Vec<String> = cfg.libraries.clone();
+    // The vendor supplicant links against the vendor interface's interface
+    // libraries and libnl, which the phone keeps in the bundle rather than on
+    // any partition: without the folder they are in, the loader stops at the
+    // first name it cannot find and the interface never comes up.
+    match crate::secure::vendor_interface_libraries() {
+        Ok(Some(dir)) => path.insert(0, dir.display().to_string()),
+        Ok(None) => {
+            let _ = skyward_sys::kmsg("the vendor interface's bundle is not on this phone, so the supplicant may not link");
+        }
+        Err(e) => {
+            let _ = skyward_sys::kmsg(&format!("the vendor interface's bundle is not open: {e:#}"));
+        }
+    }
     if let Some(dir) = libraries {
         path.push(dir.to_string_lossy().into_owned());
     }

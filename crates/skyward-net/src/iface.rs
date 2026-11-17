@@ -82,6 +82,15 @@ pub fn set_up(interface: &str, up: bool) -> Result<()> {
     let mut r = request(interface)?;
     ioctl(&fd, libc::SIOCGIFFLAGS as libc::c_int, (&mut r as *mut libc::ifreq).cast(), &format!("read how {interface} stands"))?;
     unsafe {
+        let is_up = r.ifr_ifru.ifru_flags & libc::IFF_UP as libc::c_short != 0;
+        // The WLAN driver may have brought the interface up as it registered
+        // it. Asking it to set the flag it already has returns EBUSY on this
+        // kernel, which says failure where the requested state is already the
+        // one the interface is in. Leave an interface already as requested
+        // untouched.
+        if is_up == up {
+            return Ok(());
+        }
         if up {
             r.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
         } else {

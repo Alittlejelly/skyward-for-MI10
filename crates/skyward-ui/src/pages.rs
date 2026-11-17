@@ -863,11 +863,6 @@ pub fn install(cx: &Ctx) -> Frame {
     if let Some(p) = &i.security_patch {
         facts.push((l.pick(SECURITY_PATCH), fmt::patch(l, p)));
     }
-    if let Some(s) = i.slot {
-        let (slot, other) = (s.letter(), s.other().letter());
-        let detail = tr!(l, "{slot}，系统更新将安装到槽位 {other}", "{slot}，系統更新將安裝到槽位 {other}", "{slot}, and a system update installs to slot {other}");
-        facts.push((l.pick(CURRENT_SLOT), detail));
-    }
     let ways = l.pick(["安装方式", "安裝方式", "Ways to install"]);
     let y = if facts.is_empty() {
         widgets::section_first(&mut c, t, f, top, ways)

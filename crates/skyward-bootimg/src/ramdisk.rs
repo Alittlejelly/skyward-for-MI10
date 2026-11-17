@@ -309,17 +309,19 @@ fn unpack_legacy_lz4(input: &[u8]) -> Result<Vec<u8>> {
     let mut rest = input.strip_prefix(&magic[..]).context("not legacy LZ4 framing")?;
     let mut out = Vec::new();
     while !rest.is_empty() {
-        // Each block carries its unpacked length in a four-byte header, as
-        // `lz4 -l` writes them.
+        // Each block carries its compressed length in a four-byte header.
         if rest.len() < 4 {
             bail!("a legacy LZ4 block ends before its length");
         }
         let (header, body) = rest.split_at(4);
-        let room = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        let packed = body.len().min(room);
+        let packed = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        if packed == 0 || packed > body.len() {
+            bail!("a legacy LZ4 block has an invalid compressed length {packed}");
+        }
         let (block, tail) = body.split_at(packed);
-        let chunk = lz4_flex::block::decompress(block, room).context("unpack a legacy LZ4 block")?;
-        out.extend_from_slice(&chunk);
+        let mut chunk = vec![0; LZ4_LEGACY_BLOCK];
+        let size = lz4_flex::block::decompress_into(block, &mut chunk).context("unpack a legacy LZ4 block")?;
+        out.extend_from_slice(&chunk[..size]);
         rest = tail;
     }
     Ok(out)
@@ -440,7 +442,9 @@ mod tests {
         assert_eq!((zstd.mode, zstd.data.as_slice()), (S_IFLNK | LINK_MODE, b"recovery".as_slice()));
         assert_eq!((zstd.uid, zstd.gid, zstd.nlink), (0, 0, 1));
         assert!(back.find("sbin").is_some_and(Entry::is_dir), "a missing folder is made");
-        assert!(rd.link("system/bin/recovery", "zstd").is_err(), "a file is no link to point anew");
+        rd.link("system/bin/recovery", "zstd").unwrap();
+        let replaced = rd.find("system/bin/recovery").unwrap();
+        assert_eq!((replaced.mode, replaced.data.as_slice()), (S_IFLNK | LINK_MODE, b"zstd".as_slice()), "a third-party recovery's file is replaced by the requested link");
         assert!(rd.link("system/bin/recovery/7za", "recovery").is_err(), "a file holds no links");
     }
 

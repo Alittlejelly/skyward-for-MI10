@@ -200,6 +200,36 @@ pub fn libraries() -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+/// Open the vendor interface bundle the phone's own programs are built
+/// against, whichever build of it this phone carries, and give the folder
+/// its libraries are in.
+///
+/// The property names the build the phone's platform is, which need not be
+/// the one the vendor interface it ships is: a phone may carry the v30
+/// bundle while its platform says v32, and a program built against that
+/// interface finds what it links to nowhere if only the property is asked.
+/// The bundle the phone carries is the one whose file is there.
+pub fn vendor_interface_libraries() -> Result<Option<PathBuf>> {
+    if let Some(version) = skyward_sys::prop(VENDOR_INTERFACE)
+        && let Some(at) = bundle(&format!("com.android.vndk.v{version}"))?
+    {
+        return Ok(Some(at.join(BUNDLE_LIBS)));
+    }
+    for dir in BUNDLE_DIRS {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("com.android.vndk.v") && name.ends_with(".apex") {
+                let carried = name.trim_end_matches(".apex");
+                if let Some(at) = bundle(carried)? {
+                    return Ok(Some(at.join(BUNDLE_LIBS)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Gather into one folder the installed system's libraries that the vendor
 /// interface, the vendor partition and the recovery's own system all lack,
 /// and give that folder. A program built against the vendor interface finds
