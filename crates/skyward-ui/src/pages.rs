@@ -3496,17 +3496,23 @@ pub fn logs(cx: &Ctx) -> Frame {
         true => ["Skyward/logs 文件夹", "Skyward/logs 資料夾", "The Skyward/logs folder"],
         false => DECRYPT_NEEDED,
     });
+    let drive = l.pick(match &s.usb_drive {
+        Some(UsbDrive::Shown) => ["Skyward/logs 文件夹", "Skyward/logs 資料夾", "The Skyward/logs folder"],
+        Some(UsbDrive::Unreadable(_)) => USB_DRIVE_UNREADABLE,
+        None => USB_DRIVE_WANTED,
+    });
     let places = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(["临时文件夹", "暫存資料夾", "Temporary folder"]))
             .subtitle(l.pick(["/skyward/run/logs，可通过 adb pull 导出到电脑", "/skyward/run/logs，可透過 adb pull 匯出到電腦", "/skyward/run/logs, which adb pull copies to a computer"]))
             .trail(Trail::Check(s.logs_to == 0)),
         Row::new(place_name(l, Place::Storage)).subtitle(storage).trail(Trail::Check(s.logs_to == 1)),
+        Row::new(place_name(l, Place::UsbDrive)).subtitle(drive).trail(Trail::Check(s.logs_to == 2)),
     ]);
-    out.extend(hits(&places.rows, &[Action::LogsTo(0), Action::LogsTo(1)]));
+    out.extend(hits(&places.rows, &[Action::LogsTo(0), Action::LogsTo(1), Action::LogsTo(2)]));
     let note = l.pick([
-        "每次导出保存在以导出时间命名的文件夹中。重启后将清空临时文件夹。",
-        "每次匯出儲存在以匯出時間命名的資料夾中。重新啟動後將清空暫存資料夾。",
-        "Each export goes in a folder named by when it was made. A reboot empties the temporary folder.",
+        "每次导出保存在以导出时间命名的文件夹中。重启后将清空临时文件夹；U 盘不需要解密 data，解不开 data 时请用 U 盘导出。",
+        "每次匯出儲存在以匯出時間命名的資料夾中。重新啟動後將清空暫存資料夾；USB 隨身碟不需要解密 data，解不開 data 時請用 USB 隨身碟匯出。",
+        "Each export goes in a folder named by when it was made. A reboot empties the temporary folder; a USB drive needs no decrypted data, so export there when the data partition will not open.",
     ]);
     let y = widgets::footnote(&mut c, t, f, places.bottom, note);
     let export = widgets::button(&mut c, t, f, y + t.m.dp(24.0), l.pick(["导出", "匯出", "Export"]));

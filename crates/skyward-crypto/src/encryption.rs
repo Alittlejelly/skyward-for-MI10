@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 /// The key is in a directory of this name under the one the phone names.
 const KEY_DIR: &str = "key";
 
+/// Where Android keeps the key for a partition it wrapped whole when the
+/// phone's own table names nowhere to look. vold writes it here whatever
+/// table the phone boots with, so a table that names nothing is still one
+/// whose key is found in this place.
+pub const DEFAULT_KEY_DIR: &str = "/metadata/vold/metadata_encryption/key";
+
 /// How the kernel knows the cipher a phone names.
 const CIPHERS: [(&str, &str); 2] = [("aes-256-xts", "aes-xts-plain64"), ("adiantum", "xchacha12,aes-adiantum-plain64")];
 
@@ -26,6 +32,16 @@ pub struct Encryption {
 }
 
 impl Encryption {
+    /// The forms Android has used where the phone's own table lost the words
+    /// that say which one it chose. Each is safe to try: the resulting mapping
+    /// is accepted only where blkid finds a filesystem through it.
+    pub fn defaults() -> Vec<Encryption> {
+        CIPHERS
+            .iter()
+            .flat_map(|(_, cipher)| [true, false].map(|wrapped| Encryption { cipher: (*cipher).to_string(), wrapped }))
+            .collect()
+    }
+
     /// Read what an entry of the phone's own table says.
     pub fn of(entry: &Entry) -> Result<Encryption> {
         let said = entry.extra("metadata_encryption").context("the phone says its data partition is not encrypted whole")?;
@@ -67,6 +83,16 @@ mod tests {
             filesystem: "f2fs".into(),
             options: vec!["noatime".into(), "inlinecrypt".into()],
             extras: extras.split(',').map(str::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn defaults_try_each_android_cipher_wrapped_and_plain() {
+        let defaults = Encryption::defaults();
+        assert_eq!(defaults.len(), 4);
+        for cipher in ["aes-xts-plain64", "xchacha12,aes-adiantum-plain64"] {
+            assert!(defaults.contains(&Encryption { cipher: cipher.into(), wrapped: true }));
+            assert!(defaults.contains(&Encryption { cipher: cipher.into(), wrapped: false }));
         }
     }
 

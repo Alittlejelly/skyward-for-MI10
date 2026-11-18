@@ -399,6 +399,25 @@ fn in_place(place: Place, path: &str) -> PathBuf {
     }
 }
 
+/// Save the logs chosen onto the USB drive shown at [`USB_DRIVE`], into a
+/// folder of their own there, and give the folder.
+///
+/// The drive is shown read only, for the files on it to be read, so it is
+/// made writable for the length of the saving and read only again after,
+/// whether the saving worked or not: a drive left writable would take a
+/// change nothing meant to make. Going read only is what writes the drive
+/// out, so what a phone plugged in later sees is what was saved.
+fn export_logs_to_drive(recovery: bool, kernel: bool, zone: usize) -> Result<PathBuf> {
+    let at = Path::new(USB_DRIVE);
+    ensure!(mount::is_mount_point(at)?, "no USB drive is shown, so there is nothing to save the logs onto");
+    mount::remount_writable(at, true).with_context(|| format!("make the drive at {USB_DRIVE} writable"))?;
+    // A drive taken out mid-save fails the write, which is the page's to
+    // say; the drive is left read only again either way.
+    let saved = export_logs(recovery, kernel, &at.join(STORAGE_LOGS), zone);
+    mount::remount_writable(at, false).with_context(|| format!("make the drive at {USB_DRIVE} read only again"))?;
+    saved
+}
+
 /// Save the logs chosen into a folder of their own in `into`, named by when
 /// they were saved in the zone the settings chose: the recovery's own, with
 /// what update_engine wrote while it last installed an update and what the
@@ -2688,12 +2707,16 @@ impl Pages<'_> {
             Effect::StopSkywardUpdate => self.skyward_updater.as_ref().context("Skyward is not being updated")?.stop(),
             // Logs that cannot be saved are the page's to report;
             // the recovery carries on.
-            Effect::ExportLogs { recovery, kernel, storage } => {
-                let into = match storage {
-                    true => Path::new(skyward_crypto::data::SDCARD).join(STORAGE_LOGS),
-                    false => PathBuf::from(TMP_LOGS),
+            Effect::ExportLogs { recovery, kernel, place } => {
+                let saved = match place {
+                    Some(Place::Storage) => {
+                        let into = Path::new(skyward_crypto::data::SDCARD).join(STORAGE_LOGS);
+                        export_logs(recovery, kernel, &into, self.app.state.time_zone)
+                    }
+                    Some(Place::UsbDrive) => export_logs_to_drive(recovery, kernel, self.app.state.time_zone),
+                    None => export_logs(recovery, kernel, Path::new(TMP_LOGS), self.app.state.time_zone),
                 };
-                match export_logs(recovery, kernel, &into, self.app.state.time_zone) {
+                match saved {
                     Ok(folder) => self.app.report(&skyward_ui::fmt::exported(self.app.state.lang, &folder.display().to_string()), now),
                     Err(e) => self.app.report(&skyward_ui::fmt::export_failed(self.app.state.lang, &format!("{e:#}")), now),
                 }

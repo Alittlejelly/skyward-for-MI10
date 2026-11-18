@@ -126,17 +126,54 @@ pub struct KeyMint<'a> {
     /// on its data partition encrypted needs none, and what such a phone
     /// holds opens without one; asking it for a key then says so.
     device: Option<Handle<'a>>,
+    /// What the phone runs instead of this one, where it runs nothing of
+    /// this kind: the older key services it has registered, or why they
+    /// could not be looked for. This is what tells a phone that keeps
+    /// nothing encrypted apart from one whose keys are held by a service
+    /// this program cannot speak to yet, which are very different things
+    /// to whoever is reading the answer.
+    older: std::result::Result<Vec<String>, String>,
 }
 
-/// What is said of a call made where no key service runs.
-const NO_SERVICE: &str = "the phone is running no key service, and keeps nothing it holds encrypted";
+/// What is said of a call made where no key service of this kind runs.
+const NO_SERVICE: &str = "the phone is running no key service of the newer kind, and keeps nothing it holds encrypted";
+
+/// What to say of a phone whose keys cannot be reached: what stands in for
+/// the service that is missing, and what that means for its data.
+fn absent(older: &std::result::Result<Vec<String>, String>) -> String {
+    match older {
+        // Nothing runs at all, so nothing can be holding anything closed.
+        Ok(none) if none.is_empty() => {
+            format!("{NO_SERVICE}, and none of the older kind either")
+        }
+        // The phone keeps its key where only the older kind can reach it.
+        // The release of Android that wrote this phone's table is what
+        // chose that, and such a release is one whose key service cannot be
+        // asked here yet.
+        Ok(old) => format!(
+            "the phone's keys are held by the older key service ({}), which is the one the release of Android that wrote its data table hands them to, and Skyward cannot ask it for one yet: an encrypted data partition stays closed",
+            old.join(", ")
+        ),
+        // Nothing has started the directory the older kind registers with,
+        // so nothing can be said either way.
+        Err(why) => format!("{NO_SERVICE}, and whether the older kind runs is not known: {why}"),
+    }
+}
+
+/// What the phone runs of the older key service, where it runs nothing of
+/// the newer one.
+fn older(binder: &Binder) -> std::result::Result<Vec<String>, String> {
+    crate::keymaster_hidl::running(binder).map_err(|e| format!("{e:#}"))
+}
 
 impl<'a> KeyMint<'a> {
     /// Reach the running key service, or say that none is.
     pub fn open(binder: &'a Binder) -> Result<KeyMint<'a>> {
-        let device = service::find(binder, SERVICE)?
-            .with_context(|| format!("{SERVICE} is not running; the phone's key service has to be started first"))?;
-        Ok(KeyMint { device: Some(device) })
+        let held = older(binder);
+        match service::find(binder, SERVICE)? {
+            Some(device) => Ok(KeyMint { device: Some(device), older: Ok(Vec::new()) }),
+            None => anyhow::bail!("{SERVICE} is not running: {}", absent(&held)),
+        }
     }
 
     /// The key service where the phone runs one, and nothing where none
@@ -149,12 +186,18 @@ impl<'a> KeyMint<'a> {
     /// lookup itself fails; that is no more a key service than a lookup
     /// that answers nothing is, and both are taken for none here.
     pub fn where_running(binder: &'a Binder) -> Result<KeyMint<'a>> {
-        Ok(KeyMint { device: service::find(binder, SERVICE).unwrap_or(None) })
+        match service::find(binder, SERVICE) {
+            Ok(Some(device)) => Ok(KeyMint { device: Some(device), older: Ok(Vec::new()) }),
+            _ => Ok(KeyMint { device: None, older: older(binder) }),
+        }
     }
 
     /// The service itself, where the phone runs one.
     fn device(&self) -> Result<&Handle<'a>> {
-        self.device.as_ref().context(NO_SERVICE)
+        match self.device.as_ref() {
+            Some(device) => Ok(device),
+            None => Err(anyhow::anyhow!("{}", absent(&self.older))),
+        }
     }
 
     pub fn hardware(&self) -> Result<Hardware> {

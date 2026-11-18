@@ -58,6 +58,38 @@ pub struct Hardware {
     pub author: String,
 }
 
+/// The versions of the phone's older key service, the newest first. Which
+/// of them a phone carries follows the release of Android its vendor
+/// partition was built for, and a table of the data partition written by one
+/// of those releases names its key to the service of that release.
+pub const VERSIONS: [&str; 3] = ["4.1", "4.0", "3.0"];
+
+/// The name the older key service of `version` is registered under.
+pub fn service(version: &str) -> String {
+    format!("android.hardware.keymaster@{version}::IKeymasterDevice")
+}
+
+/// Which versions of the older key service the phone has registered. A
+/// phone whose system hands its keys to the newer kind runs one of these
+/// all the same, for the programs its vendor partition carries, so a phone
+/// that answers with none here runs no key service at all.
+///
+/// The directory these register with is started only where a program is
+/// asked for, so asking before anything has started it fails rather than
+/// answering nothing; that is why this fails too instead of saying none.
+#[cfg(target_os = "android")]
+pub fn running(hardware: &skyward_binder::driver::Binder) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    for version in VERSIONS {
+        let name = service(version);
+        let there = skyward_binder::hidl::find(hardware, &name, INSTANCE).with_context(|| format!("look for {name}"))?;
+        if there.is_some() {
+            found.push(format!("{name}/{INSTANCE}"));
+        }
+    }
+    Ok(found)
+}
+
 /// Reach the running key service, or say that none is.
 #[cfg(target_os = "android")]
 pub fn open(hardware: &skyward_binder::driver::Binder) -> Result<skyward_binder::driver::Handle<'_>> {

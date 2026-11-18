@@ -4,7 +4,7 @@
 //! what it opens holds every file, with the names and contents of the ones
 //! that are a user's own still encrypted.
 
-use crate::encryption::{key_dir, target, Encryption};
+use crate::encryption::{key_dir, target, Encryption, DEFAULT_KEY_DIR};
 use crate::gatekeeper::Gatekeeper;
 use crate::keymint::KeyMint;
 use crate::keystore::{StoredKey, Unwrap};
@@ -39,6 +39,12 @@ pub fn storage_key(service: &KeyMint, entry: &Entry, encryption: &Encryption) ->
     hardware_key(service, &key_dir(entry)?, encryption.wrapped)
 }
 
+/// Unwrap the metadata key at Android's fixed fallback path, for a table
+/// that no longer says where or how it is kept.
+fn default_storage_key(service: &KeyMint, encryption: &Encryption) -> Result<Vec<u8>> {
+    hardware_key(service, Path::new(DEFAULT_KEY_DIR), encryption.wrapped)
+}
+
 /// The key a directory holds, in the form the storage hardware takes for
 /// this start of the phone. A key the hardware holds never appears as
 /// itself: what comes back is wrapped again, for this start only.
@@ -68,54 +74,133 @@ pub struct Opened {
 /// until that user's key is let in as well. A partition that does not
 /// mount leaves no device behind.
 fn open(service: &KeyMint) -> Result<Opened> {
-    let (entries, mapped) = map(service)?;
+    let (entries, mapped, wrapped) = map(service)?;
     let mounted = (|| -> Result<(Option<Checked>, String)> {
-        // A phone that names the partition once per filesystem it might
-        // hold mounts it with the entry of the one it holds.
+        // A phone that names the partition once per filesystem it might hold
+        // mounts it with the entry of the one it holds. That is the entry
+        // blkid names, and it is tried first; the table's other lines for
+        // this mount point follow it, since one that names the wrong
+        // filesystem first still names the right one somewhere.
         let holds = skyward_block::probe::filesystem(&mapped)?;
-        let entry = entries.iter().find(|e| holds.as_ref() == Some(&e.filesystem)).unwrap_or(&entries[0]);
-        let checked = match entry.extras.iter().any(|e| e == "check") {
-            true => Some(skyward_block::fsck::check(&mapped, &entry.filesystem)?),
-            false => None,
-        };
+        let (matching, rest): (Vec<&Entry>, Vec<&Entry>) = entries.iter().partition(|e| holds.as_ref() == Some(&e.filesystem));
         std::fs::create_dir_all(MOUNT).with_context(|| format!("make {MOUNT}"))?;
-        mount::mount(&mapped, Path::new(MOUNT), &entry.filesystem, &entry.options)?;
-        Ok((checked, entry.filesystem.clone()))
+        let mut scanned = false;
+        let mut refused: Vec<String> = Vec::new();
+        for entry in matching.into_iter().chain(rest) {
+            let checked = match !scanned && holds.as_ref() == Some(&entry.filesystem) && entry.extras.iter().any(|e| e == "check") {
+                true => {
+                    scanned = true;
+                    Some(skyward_block::fsck::check(&mapped, &entry.filesystem)?)
+                }
+                false => None,
+            };
+            match mount_data(&mapped, entry) {
+                Ok(()) => return Ok((checked, entry.filesystem.clone())),
+                Err(e) => refused.push(format!("{e:#}")),
+            }
+        }
+        anyhow::bail!("{} holds no filesystem the phone's own table mounts ({})", mapped.display(), refused.join("; "))
     })();
     match mounted {
         Ok((checked, filesystem)) => Ok(Opened { mapped, filesystem, checked }),
-        Err(e) => match dm::remove(MAPPED) {
-            Ok(()) => Err(e),
-            Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+        // A partition read where it lies was never mapped: there is no device
+        // to take away, and asking for one only wraps the reason the mount
+        // failed in an error about a device that was never made.
+        Err(e) => match wrapped {
+            false => Err(e),
+            true => match dm::remove(MAPPED) {
+                Ok(()) => Err(e),
+                Err(r) => Err(e.context(format!("removing {MAPPED} afterwards failed too: {r:#}"))),
+            },
         },
     }
 }
 
+/// Mount the data partition at /data as `entry` says, and where the kernel
+/// will not take the options it names, again with none.
+///
+/// A phone's table is written for its own kernel, which need not be the one
+/// the recovery runs: an option this kernel does not know fails the whole
+/// mount with an argument error, and nothing in that error says which option
+/// it was. The options tune the filesystem rather than make it readable, so
+/// the mount is tried again without them.
+fn mount_data(device: &Path, entry: &Entry) -> Result<()> {
+    let at = Path::new(MOUNT);
+    match mount::mount(device, at, &entry.filesystem, &entry.options) {
+        Ok(()) => Ok(()),
+        Err(e) if took_no_options(&e) => mount::mount(device, at, &entry.filesystem, &[])
+            .with_context(|| format!("and again as {} without the options the kernel refused: {e:#}", entry.filesystem)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the kernel answered that it would not take what it was given: an
+/// option it does not know, and a superblock it will not read, come back the
+/// same way.
+fn took_no_options(e: &anyhow::Error) -> bool {
+    e.root_cause().downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::InvalidInput)
+}
+
 /// Map the data partition decrypted, under the key the phone keeps for it,
-/// and give its table's entries, the first the one the key is found by,
-/// and the device the filesystem is read and written through.
+/// and give its table's entries, the device the filesystem is read and
+/// written through, and whether that device is one this mapped.
 ///
 /// A phone may keep the partition itself as it lies and encrypt only what
 /// each user's own files hold. Then the table names no key, and there is
 /// neither a key to unwrap nor a device to map: the partition is read
 /// where it is.
-fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
+fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf, bool)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
-    let entry = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    let first = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    // A phone may name the same mount point more than once, once per
+    // filesystem it might hold, and only the line of the one it holds says
+    // how that one is wrapped. An entry that names the encryption is taken
+    // where the table has one, whichever of its lines that is.
+    let entry = entries.iter().find(|e| e.extra("metadata_encryption").is_some()).unwrap_or(first);
     let device = skyward_block::fstab::device(entry)?;
-    // A phone may keep the partition itself as it lies and encrypt only what
-    // each user's own files hold, as this one does: its table names no
-    // metadata_encryption, so there is no key to unwrap and no device to map.
-    // The partition is read where it lies, and what of it is a user's own
-    // stays closed until that user's key is let in.
+    let sectors = skyward_block::size_bytes(&device)? / 512;
     if entry.extra("metadata_encryption").is_none() {
-        return Ok((entries, PathBuf::from(device)));
+        // A phone may keep the partition itself as it lies and encrypt only
+        // what each user's own files hold: where blkid sees that filesystem,
+        // read it where it lies. Some builds lose the metadata-encryption
+        // words from their table although vold still wrote the standard key;
+        // where the raw partition holds no filesystem, try every form Android
+        // has used and keep only one through which blkid finds a filesystem.
+        if skyward_block::probe::filesystem(Path::new(&device))?.is_some() {
+            return Ok((entries, PathBuf::from(device), false));
+        }
+        anyhow::ensure!(Path::new(DEFAULT_KEY_DIR).is_dir(), "{device} looks encrypted whole, the phone's own table says nothing of how, and {DEFAULT_KEY_DIR} is not there");
+        let mut refused = Vec::new();
+        for encryption in Encryption::defaults() {
+            let about = format!("{} ({})", encryption.cipher, if encryption.wrapped { "hardware-wrapped" } else { "plain" });
+            let key = match default_storage_key(service, &encryption) {
+                Ok(key) => key,
+                Err(e) => {
+                    refused.push(format!("{about}: {e:#}"));
+                    continue;
+                }
+            };
+            let mapped = match dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false) {
+                Ok(mapped) => mapped,
+                Err(e) => {
+                    refused.push(format!("{about}: {e:#}"));
+                    continue;
+                }
+            };
+            let found = skyward_block::probe::filesystem(&mapped);
+            match found {
+                Ok(Some(_)) => return Ok((entries, mapped, true)),
+                Ok(None) => refused.push(format!("{about}: the mapping holds no filesystem blkid names")),
+                Err(e) => refused.push(format!("{about}: {e:#}")),
+            }
+            dm::remove(MAPPED).with_context(|| format!("remove the rejected {about} mapping"))?;
+        }
+        anyhow::bail!("{device} looks encrypted whole, the phone's own table says nothing of how, and none of Android's metadata-encryption forms opened it ({})", refused.join("; "));
     }
     let encryption = Encryption::of(entry)?;
     let key = storage_key(service, entry, &encryption)?;
-    let sectors = skyward_block::size_bytes(&device)? / 512;
     let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
-    Ok((entries, mapped))
+    Ok((entries, mapped, true))
 }
 
 /// Map the data partition decrypted without mounting it, for its
@@ -123,12 +208,16 @@ fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf)> {
 /// [`unmap`] takes it away again. The partition is to be closed.
 pub fn map_unmounted(service: &KeyMint) -> Result<PathBuf> {
     anyhow::ensure!(dm::status(MAPPED)?.is_none(), "the data partition is open");
-    map(service).map(|(_, mapped)| mapped)
+    map(service).map(|(_, mapped, _)| mapped)
 }
 
-/// Take away the mapping [`map_unmounted`] made.
+/// Take away the mapping [`map_unmounted`] made, where one was made: a
+/// partition read where it lies has no device to take away.
 pub fn unmap() -> Result<()> {
-    dm::remove(MAPPED)
+    match dm::status(MAPPED)? {
+        Some(_) => dm::remove(MAPPED),
+        None => Ok(()),
+    }
 }
 
 /// Show the owner's shared storage at /sdcard; shown already, it stays.

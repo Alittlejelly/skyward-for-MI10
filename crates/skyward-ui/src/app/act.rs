@@ -286,13 +286,23 @@ impl App {
                 self.refresh();
             }
             Action::ExportLogs => {
-                let ([recovery, kernel], storage) = (self.state.logs, self.state.logs_to == 1);
+                let [recovery, kernel] = self.state.logs;
+                // The temporary folder is the recovery's own memory, and
+                // the two places are the storage the phone's files show in
+                // and the drive plugged into its port.
+                let place = match self.state.logs_to {
+                    1 => Some(Place::Storage),
+                    2 => Some(Place::UsbDrive),
+                    _ => None,
+                };
                 if !recovery && !kernel {
                     self.say(l.pick(["请选择要导出的日志", "請選擇要匯出的記錄", "Choose the logs to export"]), now);
-                } else if storage && !self.state.data.storage_open() {
+                } else if place == Some(Place::Storage) && !self.state.data.storage_open() {
                     self.say(l.pick(DECRYPT_FIRST), now);
+                } else if place == Some(Place::UsbDrive) && !self.state.place_open(Place::UsbDrive) {
+                    self.say(l.pick(USB_DRIVE_WANTED), now);
                 } else {
-                    return vec![Effect::ExportLogs { recovery, kernel, storage }];
+                    return vec![Effect::ExportLogs { recovery, kernel, place }];
                 }
             }
             Action::PickSlot(slot) => {
