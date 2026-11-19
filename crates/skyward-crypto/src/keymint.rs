@@ -192,6 +192,11 @@ impl<'a> KeyMint<'a> {
         }
     }
 
+    /// Whether the newer key service is the one the phone runs.
+    pub fn is_running(&self) -> bool {
+        self.device.is_some()
+    }
+
     /// The service itself, where the phone runs one.
     fn device(&self) -> Result<&Handle<'a>> {
         match self.device.as_ref() {

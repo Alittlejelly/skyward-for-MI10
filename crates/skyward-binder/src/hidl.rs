@@ -30,8 +30,25 @@ const OBJECT_BYTES: usize = 24;
 /// are, how many there are, and whether whoever holds it frees them.
 const FRAME_BYTES: usize = 16;
 
+/// A run of values, as a frame holds one: where the first is, and how many
+/// follow. The count is written as a whole word even though a run of these
+/// never holds two billion of anything.
+const RUN_COUNT: usize = 16;
+
 /// What the driver copies for an address is rounded up to a whole word.
 const WORD: u64 = 8;
+
+/// One value of a run of parameters a hardware service is handed: the tag it
+/// is known by, and either a number or a run of bytes.
+///
+/// This is the older layout of the key service's `KeyParameter`: a four-byte
+/// tag, the eight-byte `IntegerParams` union, then a 16-byte `hidl_vec`. The
+/// union is an ordinary HAL union and therefore carries no discriminator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    Integer { tag: u32, value: u64 },
+    Blob { tag: u32, bytes: Vec<u8> },
+}
 
 /// A call being written. What the addresses point at is kept here too, so
 /// it stays where it is until the driver has read it.
@@ -64,11 +81,89 @@ impl Message {
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
+    pub fn i32(&mut self, v: i32) {
+        self.u32(v as u32);
+    }
+
     /// A run of bytes: the frame that says where they are, then an address
     /// for the bytes themselves.
     pub fn bytes(&mut self, value: &[u8]) {
         let at = self.keep(value.to_vec());
         self.framed(at, value.len(), value.len());
+    }
+
+    /// A run of parameters, as the key service takes one: a frame saying
+    /// where the run is and how many are in it, then the run itself, whose
+    /// every parameter that carries bytes has those bytes pointed at from
+    /// where they lie in the run.
+    pub fn parameters(&mut self, params: &[Param]) {
+        // The run, laid out one parameter after another: its tag, four
+        // bytes of alignment, the eight-byte union, and the vector frame.
+        const STRIDE: usize = 4 + 4 + 8 + FRAME_BYTES;
+        let mut run = vec![0u8; STRIDE * params.len()];
+        let mut inside = Vec::new();
+        for (k, param) in params.iter().enumerate() {
+            let at = k * STRIDE;
+            match param {
+                Param::Integer { tag, value } => {
+                    run[at..at + 4].copy_from_slice(&tag.to_le_bytes());
+                    run[at + 8..at + 16].copy_from_slice(&value.to_le_bytes());
+                }
+                Param::Blob { tag, bytes } => {
+                    run[at..at + 4].copy_from_slice(&tag.to_le_bytes());
+                    let frame = at + 16;
+                    let held = self.keep(bytes.clone());
+                    run[frame..frame + 8].copy_from_slice(&held.to_le_bytes());
+                    run[frame + 8..frame + RUN_COUNT].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+                    inside.push((frame, held, bytes.len()));
+                }
+            }
+        }
+        let run = run.into_boxed_slice();
+        let run_at = run.as_ptr() as u64;
+        self.held.push(run);
+        // The frame that says where the run is, and then the run.
+        let mut frame = Vec::with_capacity(FRAME_BYTES);
+        frame.extend_from_slice(&run_at.to_le_bytes());
+        frame.extend_from_slice(&(params.len() as u64).to_le_bytes());
+        let frame_at = self.keep(frame);
+        let parent = self.address(frame_at, FRAME_BYTES, None);
+        let run_inside = self.address(run_at, STRIDE * params.len(), Some((parent, 0)));
+        // What each parameter carries lies inside the run, and the driver is
+        // told where, so that the address it writes there is the one this
+        // program's answer holds.
+        for (frame, at, len) in inside {
+            self.address(at, len, Some((run_inside, frame)));
+        }
+    }
+
+    /// A fixed-layout HIDL structure handed over as a top-level buffer.
+    pub fn structure(&mut self, value: &[u8]) {
+        self.structure_with(value.to_vec(), Vec::new());
+    }
+
+    /// A fixed-layout HIDL structure with vectors embedded at these offsets.
+    /// Each child names its frame's offset, bytes, and element count. The
+    /// driver then rewrites the pointer in the parent structure exactly as
+    /// libhidl's `writeEmbeddedBuffer` does.
+    pub fn structure_with(&mut self, mut value: Vec<u8>, children: Vec<(usize, Vec<u8>, usize)>) {
+        let mut held = Vec::new();
+        for (offset, bytes, count) in children {
+            assert!(offset + FRAME_BYTES <= value.len(), "an embedded vector frame fits in its structure");
+            let at = self.keep(bytes.clone());
+            value[offset..offset + 8].copy_from_slice(&at.to_le_bytes());
+            value[offset + 8..offset + 12].copy_from_slice(&(count as u32).to_le_bytes());
+            value[offset + 12..offset + 16].fill(0);
+            held.push((offset, at, bytes.len()));
+        }
+        let value = value.into_boxed_slice();
+        let at = value.as_ptr() as u64;
+        let len = value.len();
+        self.held.push(value);
+        let parent = self.address(at, len, None);
+        for (offset, at, len) in held {
+            self.address(at, len, Some((parent, offset)));
+        }
     }
 
     /// Text, which is a run of bytes with a terminator the count leaves
@@ -98,22 +193,23 @@ impl Message {
         frame.extend_from_slice(&[0; 4]);
         let frame_at = self.keep(frame);
         let parent = self.address(frame_at, FRAME_BYTES, None);
-        self.address(at, length, Some(parent));
+        self.address(at, length, Some((parent, 0)));
     }
 
     /// Write an address among the values and say where it sits, which is
-    /// how the driver finds it. The answer is which address this is, for
-    /// the one pointing inside it to name.
-    fn address(&mut self, at: u64, length: usize, inside: Option<usize>) -> usize {
+    /// how the driver finds it. `inside` names the address whose memory
+    /// this one lies in, and how far into it. The answer is which address
+    /// this is, for the one following it to name.
+    fn address(&mut self, at: u64, length: usize, inside: Option<(usize, usize)>) -> usize {
         let which = self.addresses.len();
         self.addresses.push(self.data.len() as u64);
         self.data.extend_from_slice(&ADDRESS.to_le_bytes());
         self.data.extend_from_slice(&inside.map_or(0, |_| INSIDE_ANOTHER).to_le_bytes());
         self.data.extend_from_slice(&at.to_le_bytes());
         self.data.extend_from_slice(&(length as u64).to_le_bytes());
-        self.data.extend_from_slice(&(inside.unwrap_or(0) as u64).to_le_bytes());
+        self.data.extend_from_slice(&(inside.map_or(0, |(parent, _)| parent) as u64).to_le_bytes());
         // The address inside the frame is the frame's first field.
-        self.data.extend_from_slice(&0u64.to_le_bytes());
+        self.data.extend_from_slice(&(inside.map_or(0, |(_, offset)| offset) as u64).to_le_bytes());
         self.pointed += (length as u64).next_multiple_of(WORD);
         which
     }
@@ -161,6 +257,38 @@ impl<'a> Answer<'a> {
         Ok(i32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
     }
 
+    pub fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+    }
+
+    /// Read a HIDL vector: first its 16-byte frame, then the contiguous
+    /// values the frame points at. Embedded addresses belonging to values
+    /// inside the run follow after that and are the caller's to read.
+    pub fn vector(&mut self) -> Result<&'a [u8]> {
+        let frame = self.pointed()?;
+        if frame.len() < FRAME_BYTES {
+            bail!("the frame of a vector is {} bytes, not {FRAME_BYTES}", frame.len());
+        }
+        self.pointed()
+    }
+
+    /// Step over a vector of parameters a service answered with. The caller
+    /// needs none of the returned values; an empty vector therefore needs
+    /// only its frame and run read, while a non-empty one is rejected rather
+    /// than guessed past because its embedded blobs also occupy addresses.
+    pub fn run(&mut self) -> Result<()> {
+        let frame = self.pointed()?;
+        if frame.len() < FRAME_BYTES {
+            bail!("the frame of a run of parameters is {} bytes, not {FRAME_BYTES}", frame.len());
+        }
+        let count = u64::from_le_bytes(frame[8..16].try_into().expect("eight bytes"));
+        let values = self.pointed()?;
+        if count == 0 {
+            return Ok(());
+        }
+        bail!("the service returned {count} parameters in {} bytes, which this call does not use", values.len())
+    }
+
     /// A truth value: a byte, padded to four as everything is.
     pub fn bool(&mut self) -> Result<bool> {
         Ok(self.take(4)?[0] != 0)
@@ -178,6 +306,9 @@ impl<'a> Answer<'a> {
         let at = u64::from_le_bytes(raw[8..16].try_into().expect("eight bytes"));
         let length = u64::from_le_bytes(raw[16..24].try_into().expect("eight bytes"));
         if at == 0 {
+            if length == 0 {
+                return Ok(&[]);
+            }
             bail!("the service left out something the call asked for");
         }
         Ok(unsafe { std::slice::from_raw_parts(at as *const u8, length as usize) })
@@ -275,8 +406,24 @@ mod tests {
                 let inside = u64::from_le_bytes(raw[24..32].try_into().unwrap());
                 let bytes = unsafe { std::slice::from_raw_parts(points as *const u8, length) }.to_vec();
                 assert_eq!(u32::from_le_bytes(raw[0..4].try_into().unwrap()), ADDRESS);
-                assert_eq!(u64::from_le_bytes(raw[32..40].try_into().unwrap()), 0);
                 (flags, inside, bytes)
+            })
+            .collect()
+    }
+
+    /// Where each address says its memory lies inside another: the address
+    /// it lies in, and how far into it, or none where it stands alone.
+    fn offsets(m: &Message) -> Vec<Option<(u64, u64)>> {
+        m.addresses
+            .iter()
+            .map(|at| {
+                let raw = &m.data[*at as usize..*at as usize + ADDRESS_BYTES];
+                let inside = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+                let offset = u64::from_le_bytes(raw[32..40].try_into().unwrap());
+                match u32::from_le_bytes(raw[4..8].try_into().unwrap()) {
+                    0 => None,
+                    _ => Some((inside, offset)),
+                }
             })
             .collect()
     }
@@ -335,8 +482,27 @@ mod tests {
     }
 
     #[test]
-    fn a_service_that_refused_the_call_is_an_error() {
-        let mut reply = 3i32.to_le_bytes().to_vec();
+    fn a_run_of_parameters_carries_its_numbers_and_points_at_its_bytes() {
+        let mut m = Message::call("a.b@4.0::IC");
+        let nonce = [7u8; 12];
+        m.parameters(&[Param::Integer { tag: 1, value: 128 }, Param::Blob { tag: 2, bytes: nonce.to_vec() }]);
+        let parts = written(&m);
+        let places = offsets(&m);
+        assert_eq!(parts.len(), 3, "the run's frame, the run, and the bytes one parameter carries");
+        assert_eq!(u64::from_le_bytes(parts[0].2[8..16].try_into().unwrap()), 2, "two parameters");
+        assert_eq!(places[1], Some((0, 0)), "the run lies at the start of the frame");
+        // 4-byte tag + 4-byte alignment + 8-byte union + 16-byte hidl_vec.
+        assert_eq!(parts[1].2.len(), 64, "two parameters of 32 bytes");
+        assert_eq!(u32::from_le_bytes(parts[1].2[0..4].try_into().unwrap()), 1, "the first tag");
+        assert_eq!(u64::from_le_bytes(parts[1].2[8..16].try_into().unwrap()), 128, "the number in the union");
+        assert_eq!(u32::from_le_bytes(parts[1].2[32..36].try_into().unwrap()), 2, "the second tag");
+        assert_eq!(u64::from_le_bytes(parts[1].2[56..64].try_into().unwrap()), 12, "how many bytes it carries");
+        assert_eq!(places[2], Some((1, 48)), "the bytes lie at the blob frame inside the run");
+        assert_eq!(parts[2].2, nonce.to_vec());
+    }
+
+    #[test]
+    fn a_service_that_refused_the_call_is_an_error() {        let mut reply = 3i32.to_le_bytes().to_vec();
         reply.extend_from_slice(&(-1i32).to_le_bytes());
         assert!(Answer::new(&reply).status().is_err());
         assert!(Answer::new(&0i32.to_le_bytes()).status().is_ok());

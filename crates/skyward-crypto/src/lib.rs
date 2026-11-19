@@ -25,3 +25,12 @@ impl keystore::Decryptor for keymint::KeyMint<'_> {
         keymint::KeyMint::gcm_decrypt(self, key_blob, app_id, nonce, body, None)
     }
 }
+
+#[cfg(target_os = "android")]
+impl keystore::Decryptor for keymaster_hidl::Keymaster<'_> {
+    fn gcm_decrypt(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], body: &[u8]) -> anyhow::Result<Vec<u8>> {
+        // The older service is asked under no note of an answered screen
+        // lock either: the keys it unseals here are the phone's own.
+        keymaster_hidl::Keymaster::gcm_decrypt(self, key_blob, app_id, nonce, body)
+    }
+}

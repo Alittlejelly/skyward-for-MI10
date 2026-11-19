@@ -6,8 +6,9 @@
 
 use crate::encryption::{key_dir, target, Encryption, DEFAULT_KEY_DIR};
 use crate::gatekeeper::Gatekeeper;
+use crate::keymaster_hidl::Keymaster;
 use crate::keymint::KeyMint;
-use crate::keystore::{StoredKey, Unwrap};
+use crate::keystore::{Decryptor, StoredKey, Unwrap};
 use crate::token::Token;
 use crate::user::Bound;
 use crate::weaver::Weaver;
@@ -39,22 +40,57 @@ pub fn storage_key(service: &KeyMint, entry: &Entry, encryption: &Encryption) ->
     hardware_key(service, &key_dir(entry)?, encryption.wrapped)
 }
 
+/// The storage key through the older HIDL Keymaster used by Android 11 and
+/// earlier. Those releases keep the metadata key in the same directory
+/// layout, but vold sends the wrapping operation to Keymaster directly.
+#[cfg(target_os = "android")]
+pub fn storage_key_hidl(service: &Keymaster, entry: &Entry, encryption: &Encryption) -> Result<Vec<u8>> {
+    anyhow::ensure!(!encryption.wrapped, "the metadata key is hardware-wrapped and needs the newer KeyMint conversion operation");
+    hardware_key_with(service, &key_dir(entry)?)
+}
+
+/// What either generation of Android key service does with a stored data
+/// key. The newer one can also convert a hardware-wrapped storage key into
+/// its per-boot form; the older one can only return the plain metadata key
+/// used by Android releases that still called Keymaster directly.
+pub trait StorageService: Decryptor {
+    fn stored_key(&self, dir: &Path, wrapped: bool) -> Result<Vec<u8>>;
+}
+
+impl StorageService for KeyMint<'_> {
+    fn stored_key(&self, dir: &Path, wrapped: bool) -> Result<Vec<u8>> {
+        hardware_key(self, dir, wrapped)
+    }
+}
+
+impl StorageService for Keymaster<'_> {
+    fn stored_key(&self, dir: &Path, wrapped: bool) -> Result<Vec<u8>> {
+        anyhow::ensure!(!wrapped, "{} is hardware-wrapped and needs the newer KeyMint conversion operation", dir.display());
+        hardware_key_with(self, dir)
+    }
+}
+
 /// Unwrap the metadata key at Android's fixed fallback path, for a table
 /// that no longer says where or how it is kept.
-fn default_storage_key(service: &KeyMint, encryption: &Encryption) -> Result<Vec<u8>> {
-    hardware_key(service, Path::new(DEFAULT_KEY_DIR), encryption.wrapped)
+fn default_storage_key<S: StorageService>(service: &S, encryption: &Encryption) -> Result<Vec<u8>> {
+    service.stored_key(Path::new(DEFAULT_KEY_DIR), encryption.wrapped)
 }
 
 /// The key a directory holds, in the form the storage hardware takes for
 /// this start of the phone. A key the hardware holds never appears as
 /// itself: what comes back is wrapped again, for this start only.
 fn hardware_key(service: &KeyMint, dir: &Path, wrapped: bool) -> Result<Vec<u8>> {
-    let stored = StoredKey::load(dir).with_context(|| format!("read the key in {}", dir.display()))?;
-    let key = stored.unwrap(Unwrap::Hardware(service)).with_context(|| format!("unwrap the key in {}", dir.display()))?;
+    let key = hardware_key_with(service, dir)?;
     match wrapped {
         true => service.ephemeral_storage_key(&key).with_context(|| format!("make the key in {} usable now", dir.display())),
         false => Ok(key),
     }
+}
+
+/// Unwrap a stored key with either generation of Android key service.
+fn hardware_key_with<K: Decryptor>(service: &K, dir: &Path) -> Result<Vec<u8>> {
+    let stored = StoredKey::load(dir).with_context(|| format!("read the key in {}", dir.display()))?;
+    stored.unwrap(Unwrap::Hardware(service)).with_context(|| format!("unwrap the key in {}", dir.display()))
 }
 
 /// The data partition as [`open`] leaves it.
@@ -73,7 +109,7 @@ pub struct Opened {
 /// it. The names and contents of each user's own files stay encrypted
 /// until that user's key is let in as well. A partition that does not
 /// mount leaves no device behind.
-fn open(service: &KeyMint) -> Result<Opened> {
+fn open<S: StorageService>(service: &S) -> Result<Opened> {
     let (entries, mapped, wrapped) = map(service)?;
     let mounted = (|| -> Result<(Option<Checked>, String)> {
         // A phone that names the partition once per filesystem it might hold
@@ -149,7 +185,7 @@ fn took_no_options(e: &anyhow::Error) -> bool {
 /// each user's own files hold. Then the table names no key, and there is
 /// neither a key to unwrap nor a device to map: the partition is read
 /// where it is.
-fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf, bool)> {
+fn map<S: StorageService>(service: &S) -> Result<(Vec<Entry>, PathBuf, bool)> {
     let entries = skyward_block::fstab::read(MOUNT)?;
     let first = entries.first().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
     // A phone may name the same mount point more than once, once per
@@ -198,7 +234,7 @@ fn map(service: &KeyMint) -> Result<(Vec<Entry>, PathBuf, bool)> {
         anyhow::bail!("{device} looks encrypted whole, the phone's own table says nothing of how, and none of Android's metadata-encryption forms opened it ({})", refused.join("; "));
     }
     let encryption = Encryption::of(entry)?;
-    let key = storage_key(service, entry, &encryption)?;
+    let key = service.stored_key(&key_dir(entry)?, encryption.wrapped)?;
     let mapped = dm::create(MAPPED, &[target(&device, sectors, &key, &encryption)], false)?;
     Ok((entries, mapped, true))
 }
@@ -270,6 +306,19 @@ pub struct Opening {
 /// sign in, and open the own files of every user who set no screen lock
 /// and, behind the owner's, of those whose credential the phone made up.
 pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
+    open_without_credential_with(service, Some(service))
+}
+
+/// Open the data partition through the older HIDL Keymaster. This reaches
+/// the metadata key and mounts the filesystem on Android releases whose
+/// vold still called Keymaster directly. Their user keys need the older
+/// keystore stack as well; where there are any, leave them closed with a
+/// precise reason instead of misreporting the metadata key as unreadable.
+pub fn open_without_credential_hidl(service: &Keymaster) -> Result<Opening> {
+    open_without_credential_with(service, None)
+}
+
+fn open_without_credential_with<S: StorageService>(service: &S, users: Option<&KeyMint>) -> Result<Opening> {
     let mounted = match mount::is_mount_point(Path::new(MOUNT))? {
         true => None,
         false => Some(open(service)?),
@@ -282,14 +331,17 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
         show_owner_storage()?;
         return Ok(Opening { mounted, closed: Vec::new() });
     }
-    open_shared(service)?;
+    let users_service = users.context(
+        "the data filesystem is open through HIDL Keymaster, but this Android's user-file keys need its older keystore stack, which Skyward does not speak yet",
+    )?;
+    open_shared(users_service)?;
     let mut closed = Vec::new();
     let mut owner = Note::default();
-    for user in open_users(service)? {
+    for user in open_users(users_service)? {
         let protector = protector(user)?;
         match protector.lock {
             None => {
-                let note = open_user_files(service, user, None, None)?;
+                let note = open_user_files(users_service, user, None, None)?;
                 if user == OWNER {
                     owner = note;
                 }
@@ -297,7 +349,7 @@ pub fn open_without_credential(service: &KeyMint) -> Result<Opening> {
             Some(lock) => closed.push(Closed { user, lock: lock.kind, made_up: made_up(user, &protector.id), why: None }),
         }
     }
-    Ok(Opening { mounted, closed: open_made_up(service, closed, &owner) })
+    Ok(Opening { mounted, closed: open_made_up(users_service, closed, &owner) })
 }
 
 /// Whether the phone keeps anything on its data partition encrypted. It

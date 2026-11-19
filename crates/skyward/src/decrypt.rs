@@ -5,6 +5,7 @@
 use anyhow::Result;
 use skyward_binder::driver::Binder;
 use skyward_crypto::data::{self, Closed, Opening};
+use skyward_crypto::keymaster_hidl::Keymaster;
 use skyward_crypto::keymint::KeyMint;
 use skyward_sys::worker::Worker;
 use std::os::fd::RawFd;
@@ -34,7 +35,7 @@ impl Decryptor {
     pub fn start(job: Job) -> Result<Decryptor> {
         let worker = Worker::start("decrypt", move |tell| {
             tell.tell(match job {
-                Job::Open => Ended::Opened(with_key_service(data::open_without_credential)),
+                Job::Open => Ended::Opened(open_data()),
                 Job::Unlock { closed, user, credential } => {
                     Ended::Unlocked(with_key_service(|service| data::unlock(service, &closed, user, &credential)))
                 }
@@ -54,8 +55,25 @@ impl Decryptor {
     }
 }
 
-/// Do `work` with the phone's key service, reached afresh for it, and say
-/// why it failed in words for the page.
+/// Open data with the generation of key service the installed Android uses.
+/// Android 12 and later hand storage keys to AIDL KeyMint; Android 11 and
+/// earlier hand them directly to HIDL Keymaster.
+fn open_data() -> Result<Opening, String> {
+    let done = (|| {
+        let binder = Binder::open()?;
+        let newer = KeyMint::where_running(&binder)?;
+        if newer.is_running() {
+            return data::open_without_credential(&newer);
+        }
+        let hardware = Binder::hardware()?;
+        let older = Keymaster::open(&hardware)?;
+        data::open_without_credential_hidl(&older)
+    })();
+    done.map_err(|e| format!("{e:#}"))
+}
+
+/// Do `work` with the newer key service, reached afresh for it, and say why
+/// it failed in words for the page. User-file keys use this path.
 pub fn with_key_service<T>(work: impl FnOnce(&KeyMint) -> Result<T>) -> Result<T, String> {
     let done = (|| {
         let binder = Binder::open()?;
